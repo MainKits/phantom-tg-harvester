@@ -131,12 +131,19 @@ export default function LicenseScreen({ onActivated }) {
         {/* Error / Success messages */}
         {error && (
           <div style={{
-            display: 'flex', alignItems: 'center', gap: '10px',
+            display: 'flex', flexDirection: 'column', gap: '6px',
             background: 'rgba(255,71,87,0.1)', border: '1px solid rgba(255,71,87,0.3)',
             borderRadius: '10px', padding: '12px 16px',
-            color: '#ff6b7a', fontSize: '14px', marginBottom: '16px',
+            color: '#ff6b7a', fontSize: '13px', marginBottom: '16px',
           }}>
-            <AlertCircle size={18} />{error}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <AlertCircle size={18} />
+              <span>
+                {error === 'Failed to fetch' 
+                  ? 'Сервер на Render прокидається (безкоштовний тариф спить при неактивності ~40 сек). Зачекайте 15 секунд і натисніть знову.'
+                  : error}
+              </span>
+            </div>
           </div>
         )}
         {success && (
