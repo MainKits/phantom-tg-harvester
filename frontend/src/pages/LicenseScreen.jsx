@@ -189,7 +189,7 @@ export default function LicenseScreen({ onActivated }) {
           <p style={{ color: '#555', fontSize: '13px', margin: 0 }}>
             Немає ключа?{' '}
             <a
-              href="https://t.me/phantom_keys"
+              href="https://t.me/Bybit_temko"
               target="_blank"
               rel="noreferrer"
               style={{ color: '#8400ff', textDecoration: 'none', fontWeight: 600 }}

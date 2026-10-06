@@ -5,7 +5,8 @@ import secrets
 import string
 from fastapi import APIRouter, HTTPException, Form
 from datetime import datetime, timedelta
-from ..database import get_db
+from typing import Optional
+from ..database import get_db, get_supabase_client, sync_to_supabase_async
 
 router = APIRouter(prefix="/api/license", tags=["license"])
 
@@ -40,33 +41,73 @@ async def generate_key(
     await db.commit()
     await db.close()
 
+    # Cloud sync to Supabase
+    sync_to_supabase_async("license_keys", {
+        "key": key,
+        "status": "active",
+        "expires_at": expires_at,
+        "note": note or ""
+    }, on_conflict="key")
+
     return {"key": key, "expires_at": expires_at, "days": days}
 
 
 @router.get("/all")
 async def list_keys(master_token: str):
-    """List all license keys (admin only)."""
+    """List all license keys from Supabase cloud and local database."""
     MASTER_TOKEN = "phantom_master_2025"
     if master_token != MASTER_TOKEN:
         raise HTTPException(403, "Invalid master token")
 
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT key, status, activated_at, expires_at, note FROM license_keys ORDER BY created_at DESC"
-    )
-    rows = await cursor.fetchall()
-    await db.close()
+    keys_map = {}
 
-    return [
-        {
-            "key": r[0],
-            "status": r[1],
-            "activated_at": r[2],
-            "expires_at": r[3],
-            "note": r[4]
-        }
-        for r in rows
-    ]
+    # 1. Fetch from Supabase cloud if connected
+    sb = get_supabase_client()
+    if sb:
+        try:
+            res = sb.table("license_keys").select("*").execute()
+            if res.data:
+                for k in res.data:
+                    k_str = k.get("key")
+                    if k_str:
+                        keys_map[k_str] = {
+                            "key": k_str,
+                            "status": k.get("status", "active"),
+                            "activated_at": k.get("activated_at"),
+                            "expires_at": str(k.get("expires_at", "")),
+                            "note": k.get("note", ""),
+                            "created_at": str(k.get("created_at", ""))
+                        }
+        except Exception as e:
+            print(f"[Supabase] list_keys note: {e}")
+
+    # 2. Fetch from local SQLite and merge
+    try:
+        db = await get_db()
+        cursor = await db.execute(
+            "SELECT key, status, activated_at, expires_at, note, created_at FROM license_keys ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        await db.close()
+
+        for r in rows:
+            k_str = r[0]
+            if k_str not in keys_map:
+                keys_map[k_str] = {
+                    "key": k_str,
+                    "status": r[1],
+                    "activated_at": r[2],
+                    "expires_at": r[3],
+                    "note": r[4],
+                    "created_at": r[5]
+                }
+    except Exception as e:
+        print(f"[SQLite] list_keys error: {e}")
+
+    # Return as list sorted with newest keys first
+    result = list(keys_map.values())
+    result.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    return result
 
 
 @router.post("/activate")
@@ -216,4 +257,36 @@ async def revoke_key(key: str = Form(...), master_token: str = Form(...)):
     await db.execute("UPDATE license_keys SET status = 'revoked' WHERE key = ?", (key,))
     await db.commit()
     await db.close()
+
+    # Cloud sync
+    sb = get_supabase_client()
+    if sb:
+        try:
+            sb.table("license_keys").update({"status": "revoked"}).eq("key", key).execute()
+        except Exception:
+            pass
+
+    return {"success": True}
+
+
+@router.post("/delete")
+async def delete_key(key: str = Form(...), master_token: str = Form(...)):
+    """Permanently delete a license key."""
+    MASTER_TOKEN = "phantom_master_2025"
+    if master_token != MASTER_TOKEN:
+        raise HTTPException(403, "Invalid master token")
+
+    db = await get_db()
+    await db.execute("DELETE FROM license_keys WHERE key = ?", (key,))
+    await db.commit()
+    await db.close()
+
+    # Cloud sync
+    sb = get_supabase_client()
+    if sb:
+        try:
+            sb.table("license_keys").delete().eq("key", key).execute()
+        except Exception:
+            pass
+
     return {"success": True}
