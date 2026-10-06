@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Search, Send, UserPlus, Globe, Film, Shield, Key, Sparkles } from 'lucide-react'
+import { LayoutDashboard, Users, Search, Send, UserPlus, Globe, Film, Shield, Key, Sparkles, LogOut } from 'lucide-react'
 import UpdateModal from './UpdateModal'
 import { API } from '../apiConfig'
 
@@ -83,18 +83,43 @@ export default function Sidebar() {
               <Sparkles size={14} color="var(--accent)" /> Оновлення v{updateInfo.latest_version}!
             </button>
           ) : (
-            <div
-              onClick={() => setIsUpdateOpen(true)}
-              style={{
-                fontSize: '12px',
-                color: 'var(--text-muted)',
-                cursor: 'pointer',
-                textAlign: 'center',
-                transition: 'color 0.2s',
-              }}
-              title="Натисніть для перевірки оновлень"
-            >
-              Phantom Harvester v{updateInfo?.current_version || '1.0.0'}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+              <div
+                onClick={() => setIsUpdateOpen(true)}
+                style={{
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  cursor: 'pointer',
+                  transition: 'color 0.2s',
+                }}
+                title="Натисніть для перевірки оновлень"
+              >
+                v{updateInfo?.current_version || '1.0.0'}
+              </div>
+              <button
+                onClick={() => {
+                  if (typeof window !== 'undefined') {
+                    localStorage.removeItem('phantom_license_key')
+                    window.location.reload()
+                  }
+                }}
+                style={{
+                  background: 'rgba(255,71,87,0.1)',
+                  border: '1px solid rgba(255,71,87,0.2)',
+                  color: '#ff6b7a',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: '3px 8px',
+                  borderRadius: '6px',
+                  transition: 'all 0.2s',
+                }}
+                title="Вийти з акаунта"
+              >
+                <LogOut size={12} /> Вийти
+              </button>
             </div>
           )}
         </div>

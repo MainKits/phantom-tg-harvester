@@ -20,14 +20,37 @@ function App() {
   const [backendOnline, setBackendOnline] = useState(true)
 
   const checkLicense = async () => {
+    const savedKey = typeof window !== 'undefined' ? localStorage.getItem('phantom_license_key') : null
+
+    // If key is saved locally, keep user logged in immediately (no flicker / wait)
+    if (savedKey) {
+      setLicensed(true)
+    }
+
     try {
-      const res = await fetch(`${API}/api/license/status`)
+      const url = savedKey
+        ? `${API}/api/license/status?key=${encodeURIComponent(savedKey)}`
+        : `${API}/api/license/status`
+      const res = await fetch(url)
       const data = await res.json()
-      setLicensed(data.licensed === true)
-      setBackendOnline(true)
+
+      if (data.licensed === true) {
+        setLicensed(true)
+        setBackendOnline(true)
+      } else {
+        if (data.reason === 'expired' || data.reason === 'revoked') {
+          if (typeof window !== 'undefined') localStorage.removeItem('phantom_license_key')
+          setLicensed(false)
+        } else if (!savedKey) {
+          setLicensed(false)
+        }
+      }
     } catch {
+      // Backend asleep or cold start: do not kick user out if key is saved!
       setBackendOnline(false)
-      setLicensed(false)
+      if (!savedKey) {
+        setLicensed(false)
+      }
     } finally {
       setLicenseChecked(true)
     }

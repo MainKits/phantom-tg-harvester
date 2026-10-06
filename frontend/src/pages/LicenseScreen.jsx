@@ -21,8 +21,11 @@ export default function LicenseScreen({ onActivated }) {
       const res = await fetch(`${API}/api/license/activate`, { method: 'POST', body: fd })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Помилка активації')
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('phantom_license_key', trimmed)
+      }
       setSuccess(`Ліцензія активована до: ${new Date(data.expires_at).toLocaleDateString('uk-UA')}`)
-      setTimeout(() => onActivated(), 1500)
+      setTimeout(() => onActivated(), 1200)
     } catch (err) {
       setError(err.message)
     } finally {
