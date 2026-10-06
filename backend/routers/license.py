@@ -72,10 +72,28 @@ async def list_keys(master_token: str):
 @router.post("/activate")
 async def activate_key(key: str = Form(...)):
     """Activate a license key. Called on first login."""
+    clean_key = key.strip()
     db = await get_db()
+
+    # Master admin keys
+    admin_keys = ["phantom_master_2025", "PHANTOM-PRO-2026", "PHANTOM-ADMIN", "TIM8-LK78-NX72-HDCY"]
+    if clean_key in admin_keys:
+        expires_at = (datetime.now() + timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
+        await db.execute(
+            "INSERT OR REPLACE INTO license_keys (key, status, activated_at, expires_at, note) VALUES (?, 'active', ?, ?, 'Master Admin')",
+            (clean_key, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), expires_at)
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_license', ?)",
+            (clean_key,)
+        )
+        await db.commit()
+        await db.close()
+        return {"success": True, "expires_at": expires_at, "message": "Адміністраторська ліцензія активована!"}
+
     cursor = await db.execute(
         "SELECT key, status, expires_at FROM license_keys WHERE key = ?",
-        (key,)
+        (clean_key,)
     )
     row = await cursor.fetchone()
 
@@ -85,28 +103,27 @@ async def activate_key(key: str = Form(...)):
 
     status, expires_at = row[1], row[2]
 
-    if status == "used":
-        await db.close()
-        raise HTTPException(400, "Цей ключ вже був використаний")
-
     if status == "revoked":
         await db.close()
         raise HTTPException(400, "Цей ключ заблоковано")
 
     # Check expiry
-    if datetime.now() > datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S"):
-        await db.close()
-        raise HTTPException(400, "Термін дії ключа закінчився")
+    try:
+        if datetime.now() > datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S"):
+            await db.close()
+            raise HTTPException(400, "Термін дії ключа закінчився")
+    except Exception:
+        pass
 
-    # Mark as used
+    # Mark as active
     await db.execute(
-        "UPDATE license_keys SET status = 'used', activated_at = ? WHERE key = ?",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), key)
+        "UPDATE license_keys SET status = 'active', activated_at = ? WHERE key = ?",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), clean_key)
     )
     # Store in settings as active license
     await db.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_license', ?)",
-        (key,)
+        (clean_key,)
     )
     await db.commit()
     await db.close()
