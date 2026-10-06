@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Users, Send, UserPlus, AlertTriangle, Search, Activity, RefreshCw } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function Dashboard() {
   const [logs, setLogs] = useState([])

@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Download, Upload, Zap, Video, AlertCircle, CheckCircle2, Share2, Send } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function MediaTools() {
   const [activeTab, setActiveTab] = useState('tiktok')

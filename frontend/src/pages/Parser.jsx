@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Search, Play, Square, Download, Trash2, Filter, Upload, RefreshCw } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function Parser() {
   const [chatLinks, setChatLinks] = useState('')

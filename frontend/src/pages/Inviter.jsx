@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Play, Square, Upload, Link } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function Inviter() {
   const [targetChat, setTargetChat] = useState('')

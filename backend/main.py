@@ -21,10 +21,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for Electron/React dev
+# CORS for Web (Vercel), Electron, and local dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_origin_regex=r"^https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

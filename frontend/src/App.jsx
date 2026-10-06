@@ -11,9 +11,8 @@ import MediaTools from './pages/MediaTools'
 import TikTokManager from './pages/TikTokManager'
 import AdminLicense from './pages/AdminLicense'
 import LicenseScreen from './pages/LicenseScreen'
+import { API } from './apiConfig'
 import './index.css'
-
-const API = 'http://127.0.0.1:8000'
 
 function App() {
   const [licenseChecked, setLicenseChecked] = useState(false)
@@ -25,8 +24,8 @@ function App() {
       const res = await fetch(`${API}/api/license/status`)
       const data = await res.json()
       setLicensed(data.licensed === true)
+      setBackendOnline(true)
     } catch {
-      // If backend is offline show a message but don't block
       setBackendOnline(false)
       setLicensed(false)
     } finally {

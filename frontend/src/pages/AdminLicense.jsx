@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Key, Plus, X, Copy, CheckCircle2, Shield } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 const MASTER = 'phantom_master_2025'  // must match backend
 
 export default function AdminLicense() {

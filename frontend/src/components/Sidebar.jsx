@@ -2,8 +2,7 @@ import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import { LayoutDashboard, Users, Search, Send, UserPlus, Globe, Film, Shield, Key, Sparkles } from 'lucide-react'
 import UpdateModal from './UpdateModal'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },

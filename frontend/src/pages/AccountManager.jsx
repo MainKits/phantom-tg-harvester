@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Plus, Upload, Trash2, Shield, Key, LogIn, RefreshCw, CheckCircle, XCircle } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 const EMPTY_PROXY = { type: 'socks5', host: '', port: '', username: '', password: '' }
 

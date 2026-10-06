@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Key, Shield, Lock, CheckCircle2, AlertCircle, ExternalLink } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function LicenseScreen({ onActivated }) {
   const [key, setKey] = useState('')

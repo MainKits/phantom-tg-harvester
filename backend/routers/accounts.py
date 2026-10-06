@@ -8,7 +8,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
 from datetime import datetime
 
-from ..database import get_db, log_event
+from ..database import get_db, log_event, backup_session_to_supabase, sync_to_supabase_async
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -128,6 +128,8 @@ async def upload_sessions(files: list[UploadFile] = File(...)):
                     (phone, file.filename, status),
                 )
             imported.append(phone)
+            # Cloud backup to Supabase
+            backup_session_to_supabase(phone, file.filename)
         except Exception:
             pass
     
@@ -311,6 +313,9 @@ async def verify_auth_code(
             )
         await db.commit()
         await db.close()
+
+        # Cloud backup to Supabase
+        backup_session_to_supabase(clean_phone, session_file)
         
         await log_event("info", "accounts", f"Акаунт {clean_phone} успішно авторизовано")
         return {"success": True, "user": result}

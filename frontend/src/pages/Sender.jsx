@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Upload, Image, Play, Square, Eye, MessageSquare } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function Sender() {
   const [message, setMessage] = useState('')

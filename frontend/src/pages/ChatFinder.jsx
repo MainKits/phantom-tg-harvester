@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Search, Download, Trash2, ExternalLink, Copy, Users, Hash, Filter } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function ChatFinder() {
   const [keywords, setKeywords] = useState('')

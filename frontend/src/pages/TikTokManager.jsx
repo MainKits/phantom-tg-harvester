@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Plus, Trash2, Shield, User, Clock, AlertCircle } from 'lucide-react'
-
-const API = 'http://127.0.0.1:8000'
+import { API } from '../apiConfig'
 
 export default function TikTokManager() {
   const [accounts, setAccounts] = useState([])
