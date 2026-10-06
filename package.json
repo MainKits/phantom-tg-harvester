@@ -1,0 +1,111 @@
+{
+  "name": "phantom-tg-harvester",
+  "version": "1.0.0",
+  "description": "Phantom TG Harvester — Telegram automation desktop app",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "electron:dev": "set NODE_ENV=development && electron .",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "pyinstaller backend.spec --distpath dist-backend --workpath build-backend --noconfirm",
+    "build:exe": "npm run build:frontend && npm run build:backend && electron-builder",
+    "build": "npm run build:exe"
+  },
+  "build": {
+    "appId": "com.phantom.tg-harvester",
+    "productName": "Phantom TG Harvester",
+    "copyright": "Phantom Software",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "electron/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "extraFiles": [
+        {
+          "from": "dist-backend/backend.exe",
+          "to": "backend.exe"
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "dist-backend/backend.exe",
+          "to": "../backend.exe"
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "electron/icon.png",
+      "category": "public.app-category.utilities",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "extraFiles": [
+        {
+          "from": "dist-backend/backend",
+          "to": "backend"
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "dist-backend/backend",
+          "to": "backend"
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Phantom TG Harvester",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "electron/icon.ico",
+      "uninstallerIcon": "electron/icon.ico",
+      "installerHeaderIcon": "electron/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Phantom TG Harvester",
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*"
+    ]
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  }
+}
