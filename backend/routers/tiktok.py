@@ -6,7 +6,11 @@ import uuid
 import asyncio
 from ..database import get_db, log_event
 from .media import MEDIA_DIR, cleanup_file
-from tiktok_uploader.upload import upload_video
+
+try:
+    from tiktok_uploader.upload import upload_video
+except ImportError:
+    upload_video = None
 
 router = APIRouter(prefix="/api/tiktok", tags=["tiktok"])
 
@@ -68,6 +72,8 @@ async def _do_tiktok_post(video_path: str, description: str, account_ids: List[i
             f.write(cookie_data)
             
         try:
+            if not upload_video:
+                raise RuntimeError("Модуль tiktok_uploader не встановлено на цьому сервері")
             await log_event("info", "tiktok", f"Starting upload for @{username}")
             
             # 3. Upload using tiktok-uploader (runs in a separate thread/process potentially)
