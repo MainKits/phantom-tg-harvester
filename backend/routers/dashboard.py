@@ -17,7 +17,7 @@ _ws_connections: list = []
 
 @router.get("/settings")
 async def get_settings():
-    """Get app settings (API credentials)."""
+    """Get app settings (API credentials) from local SQLite or Supabase cloud."""
     db = await get_db()
     settings = {}
     cursor = await db.execute("SELECT key, value FROM settings")
@@ -25,6 +25,26 @@ async def get_settings():
     for row in rows:
         settings[row[0]] = row[1]
     await db.close()
+
+    # If missing in local DB, check Supabase cloud
+    if not settings.get("api_id") or not settings.get("api_hash"):
+        from ..database import get_supabase_client
+        sb = get_supabase_client()
+        if sb:
+            try:
+                res = sb.table("settings").select("*").execute()
+                if res.data:
+                    db = await get_db()
+                    for item in res.data:
+                        k, v = item.get("key"), str(item.get("value", ""))
+                        if k and v:
+                            settings[k] = v
+                            await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
+                    await db.commit()
+                    await db.close()
+            except Exception as e:
+                print(f"[Supabase] get_settings error: {e}")
+
     # Mask api_hash for security
     if "api_hash" in settings and settings["api_hash"]:
         settings["api_hash_masked"] = settings["api_hash"][:4] + "***" + settings["api_hash"][-4:]
@@ -36,19 +56,31 @@ async def save_settings(
     api_id: str = Form(""),
     api_hash: str = Form(""),
 ):
-    """Save app settings."""
+    """Save app settings to both SQLite and Supabase cloud."""
+    import os
+    from ..database import sync_to_supabase_async
+
+    clean_id = api_id.strip()
+    clean_hash = api_hash.strip()
+
     db = await get_db()
-    if api_id:
+    if clean_id:
         await db.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('api_id', ?)", (api_id,)
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('api_id', ?)", (clean_id,)
         )
-    if api_hash:
+        sync_to_supabase_async("settings", {"key": "api_id", "value": clean_id}, on_conflict="key")
+        os.environ["TG_API_ID"] = clean_id
+
+    if clean_hash:
         await db.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('api_hash', ?)", (api_hash,)
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('api_hash', ?)", (clean_hash,)
         )
+        sync_to_supabase_async("settings", {"key": "api_hash", "value": clean_hash}, on_conflict="key")
+        os.environ["TG_API_HASH"] = clean_hash
+
     await db.commit()
     await db.close()
-    await log_event("info", "settings", "API credentials updated")
+    await log_event("info", "settings", "API credentials saved and synced to cloud")
     return {"success": True}
 
 

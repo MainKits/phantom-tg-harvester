@@ -70,28 +70,66 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
         if not _parsing_active:
             break
 
-        chat_name = link.strip().split("/")[-1].lstrip("@")
+        clean_link = link.strip().rstrip("/")
+        chat_name = clean_link.split("/")[-1].lstrip("@")
         _parsing_progress["current_chat"] = chat_name
         _parsing_progress["total"] = len(links)
 
         try:
-            entity = await client.get_entity(link.strip())
-            participants = await client.get_participants(entity, limit=500)
+            # Handle private invite links (t.me/+ or joinchat/)
+            if "t.me/+" in clean_link or "joinchat/" in clean_link:
+                try:
+                    invite_hash = clean_link.split("t.me/+")[1] if "t.me/+" in clean_link else clean_link.split("joinchat/")[1]
+                    invite_hash = invite_hash.split("/")[0].split("?")[0]
+                    from telethon.tl.functions.messages import ImportChatInviteRequest
+                    try:
+                        await client(ImportChatInviteRequest(invite_hash))
+                        await asyncio.sleep(2)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            entity = await client.get_entity(clean_link)
+            participants = []
+
+            # 1. Try get_participants (works for groups and supergroups)
+            try:
+                participants = await client.get_participants(entity, limit=2000)
+            except Exception as pe:
+                # 2. Channel fallback: parse commenters and authors from recent posts
+                seen_ids = set()
+                try:
+                    async for msg in client.iter_messages(entity, limit=150):
+                        if msg.sender and hasattr(msg.sender, 'id') and msg.sender.id not in seen_ids:
+                            seen_ids.add(msg.sender.id)
+                            participants.append(msg.sender)
+                        if getattr(msg, 'replies', None) and getattr(msg.replies, 'replies', 0) > 0:
+                            try:
+                                async for reply in client.iter_messages(entity, reply_to=msg.id, limit=50):
+                                    if reply.sender and hasattr(reply.sender, 'id') and reply.sender.id not in seen_ids:
+                                        seen_ids.add(reply.sender.id)
+                                        participants.append(reply.sender)
+                            except Exception:
+                                pass
+                except Exception as iter_err:
+                    await log_event("warn", "parser", f"Channel messages parse for {chat_name}: {iter_err}")
 
             users_to_insert = []
+            supabase_users = []
 
             for user in participants:
                 if not _parsing_active:
                     break
-                if skip_bots and user.bot:
+                if skip_bots and getattr(user, 'bot', False):
                     continue
-                if user.deleted:
+                if getattr(user, 'deleted', False):
                     continue
 
                 # Check online filter
                 last_online_str = ""
                 is_recent = False
-                status = user.status
+                status = getattr(user, 'status', None)
                 if isinstance(status, UserStatusOnline):
                     last_online_str = "Online"
                     is_recent = True
@@ -119,11 +157,24 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
 
                 if online_filter and not is_recent:
                     continue
+
+                u_first = getattr(user, 'first_name', '') or ''
+                u_last = getattr(user, 'last_name', '') or ''
+                u_name = getattr(user, 'username', '') or ''
                 
                 users_to_insert.append((
-                    user.id, user.username, user.first_name, user.last_name,
+                    user.id, u_name, u_first, u_last,
                     chat_name, last_online_str, 0
                 ))
+
+                supabase_users.append({
+                    "user_id": user.id,
+                    "username": u_name,
+                    "first_name": u_first,
+                    "last_name": u_last,
+                    "source_chat": chat_name,
+                    "is_active_writer": 0
+                })
 
             if users_to_insert:
                 db = await get_db()
@@ -136,13 +187,24 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                     )
                     await db.commit()
                     total_parsed += len(users_to_insert)
+
+                    # Cloud sync to Supabase
+                    from ..database import get_supabase_client
+                    sb = get_supabase_client()
+                    if sb and supabase_users:
+                        try:
+                            # Upsert batch in chunks of 100
+                            for chunk_start in range(0, len(supabase_users), 100):
+                                sb.table("parsed_users").upsert(supabase_users[chunk_start:chunk_start+100]).execute()
+                        except Exception as sbe:
+                            pass
                 except Exception as e:
                     await log_event("warn", "parser", f"DB insert error: {str(e)}")
                 finally:
                     await db.close()
 
             _parsing_progress["parsed"] = total_parsed
-            await log_event("info", "parser", f"Parsed {chat_name}: got users (total: {total_parsed})")
+            await log_event("info", "parser", f"Parsed {chat_name}: got {len(users_to_insert)} users (total: {total_parsed})")
 
         except Exception as e:
             await log_event("warn", "parser", f"Error parsing {chat_name}: {str(e)}")
@@ -205,16 +267,57 @@ async def stop_parsing():
 
 @router.post("/upload-links")
 async def upload_links_file(file: UploadFile = File(...)):
-    """Upload a .txt file with chat links (one per line)."""
+    """Upload a .txt file with chat links (one per line or comma-separated)."""
     content = await file.read()
-    text = content.decode("utf-8")
-    links = [l.strip() for l in text.split("\n") if l.strip() and not l.startswith("#")]
+    
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "windows-1251", "cp1251", "latin-1"):
+        try:
+            text = content.decode(enc)
+            break
+        except Exception:
+            pass
+    if text is None:
+        text = content.decode("utf-8", errors="ignore")
+
+    raw_items = text.replace("\r\n", "\n").replace("\r", "\n").replace(",", "\n").replace(";", "\n").split("\n")
+    links = []
+    for l in raw_items:
+        clean = l.strip()
+        if clean and not clean.startswith("#"):
+            links.append(clean)
+
     return {"success": True, "links": links, "count": len(links)}
 
 
 @router.get("/users")
 async def get_parsed_users(limit: int = 100, offset: int = 0, source: Optional[str] = None):
     db = await get_db()
+    cursor_count = await db.execute("SELECT COUNT(*) FROM parsed_users")
+    total = (await cursor_count.fetchone())[0]
+
+    # If local SQLite is empty, check Supabase cloud and restore
+    if total == 0:
+        from ..database import get_supabase_client
+        sb = get_supabase_client()
+        if sb:
+            try:
+                res = sb.table("parsed_users").select("*").order("parsed_at", desc=True).limit(500).execute()
+                if res.data:
+                    for u in res.data:
+                        await db.execute(
+                            """INSERT OR IGNORE INTO parsed_users
+                            (user_id, username, first_name, last_name, source_chat, last_online, is_active_writer)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (u.get("user_id"), u.get("username"), u.get("first_name"), u.get("last_name"),
+                             u.get("source_chat"), u.get("last_online", "Невідомо"), u.get("is_active_writer", 0))
+                        )
+                    await db.commit()
+                    cursor_count = await db.execute("SELECT COUNT(*) FROM parsed_users")
+                    total = (await cursor_count.fetchone())[0]
+            except Exception as sbe:
+                print(f"[Supabase] get_parsed_users restore error: {sbe}")
+
     if source:
         cursor = await db.execute(
             "SELECT * FROM parsed_users WHERE source_chat = ? ORDER BY parsed_at DESC LIMIT ? OFFSET ?",

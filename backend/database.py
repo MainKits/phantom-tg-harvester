@@ -199,9 +199,14 @@ async def sync_from_supabase():
             if res.data:
                 db = await get_db()
                 for item in res.data:
+                    k, v = item.get("key"), str(item.get("value", ""))
+                    if k == "api_id":
+                        os.environ["TG_API_ID"] = v
+                    elif k == "api_hash":
+                        os.environ["TG_API_HASH"] = v
                     await db.execute(
                         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                        (item.get("key"), str(item.get("value", "")))
+                        (k, v)
                     )
                 await db.commit()
                 await db.close()

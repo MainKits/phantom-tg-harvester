@@ -15,27 +15,50 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 
 async def get_api_credentials() -> tuple:
-    """Get API credentials from database settings or environment."""
+    """Get API credentials from environment, SQLite settings, or Supabase cloud."""
     api_id = os.environ.get("TG_API_ID", "")
     api_hash = os.environ.get("TG_API_HASH", "")
 
+    # 1. Check local SQLite
     try:
-        import aiosqlite
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "phantom_harvester.db")
-        db = await aiosqlite.connect(db_path, timeout=30.0)
-        cursor = await db.execute("SELECT value FROM settings WHERE key = 'api_id'")
-        row = await cursor.fetchone()
-        if row and row[0]:
-            api_id = row[0]
-        cursor = await db.execute("SELECT value FROM settings WHERE key = 'api_hash'")
-        row = await cursor.fetchone()
-        if row and row[0]:
-            api_hash = row[0]
+        from ..database import get_db
+        db = await get_db()
+        cursor = await db.execute("SELECT key, value FROM settings WHERE key IN ('api_id', 'api_hash')")
+        rows = await cursor.fetchall()
+        for r in rows:
+            if r[0] == "api_id" and r[1]:
+                api_id = r[1]
+            elif r[0] == "api_hash" and r[1]:
+                api_hash = r[1]
         await db.close()
     except Exception:
         pass
 
-    return int(api_id) if api_id else 0, api_hash
+    # 2. Check Supabase cloud if missing
+    if not api_id or not api_hash:
+        try:
+            from ..database import get_supabase_client
+            sb = get_supabase_client()
+            if sb:
+                res = sb.table("settings").select("*").execute()
+                if res.data:
+                    for item in res.data:
+                        k, v = item.get("key"), str(item.get("value", ""))
+                        if k == "api_id" and v:
+                            api_id = v
+                        elif k == "api_hash" and v:
+                            api_hash = v
+        except Exception:
+            pass
+
+    # 3. Safe fallback to default Telegram Desktop credentials so client never crashes
+    DEFAULT_API_ID = 2040
+    DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
+
+    final_id = int(api_id) if api_id and str(api_id).isdigit() else DEFAULT_API_ID
+    final_hash = api_hash if api_hash else DEFAULT_API_HASH
+
+    return final_id, final_hash
 
 
 class TelegramEngine:
@@ -79,6 +102,23 @@ class TelegramEngine:
         # Strip .session extension to avoid double extension (e.g. file.session.session)
         session_name = (session_file or phone.replace("+", "")).replace(".session", "")
         session_path = os.path.join(SESSIONS_DIR, session_name)
+        actual_session = f"{session_path}.session"
+
+        # On-demand restore session file from Supabase cloud if missing on Render disk
+        if not os.path.exists(actual_session) or os.path.getsize(actual_session) == 0:
+            try:
+                from ..database import get_supabase_client
+                sb = get_supabase_client()
+                if sb:
+                    res = sb.table("accounts").select("session_data").or_(f"phone.eq.{phone},session_file.eq.{session_file}").execute()
+                    if res.data and res.data[0].get("session_data"):
+                        import base64
+                        with open(actual_session, "wb") as sf:
+                            sf.write(base64.b64decode(res.data[0]["session_data"]))
+                        print(f"[Supabase] Restored missing session for {phone} from cloud")
+            except Exception as restore_err:
+                print(f"[Supabase] On-demand session restore note: {restore_err}")
+
         proxy = self._get_proxy(account)
 
         try:
