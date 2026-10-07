@@ -1,17 +1,26 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Search, Download, Trash2, ExternalLink, Copy, Users, Hash, Filter } from 'lucide-react'
 import { API } from '../apiConfig'
 
 export default function ChatFinder() {
-  const [keywords, setKeywords] = useState('')
-  const [minMembers, setMinMembers] = useState(0)
-  const [limit, setLimit] = useState(50)
-  const [chatType, setChatType] = useState('all') // 'all' | 'groups' | 'channels'
+  const [keywords, setKeywords] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_cf_kw') || '' : ''))
+  const [minMembers, setMinMembers] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_cf_min')) || 0 : 0))
+  const [limit, setLimit] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_cf_limit')) || 50 : 50))
+  const [chatType, setChatType] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_cf_type') || 'all' : 'all'))
   const [searching, setSearching] = useState(false)
   const [chats, setChats] = useState([])
   const [selected, setSelected] = useState(new Set())
   const [saved, setSaved] = useState(false)
   const [stats, setStats] = useState(null)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('phantom_cf_kw', keywords)
+      localStorage.setItem('phantom_cf_min', minMembers)
+      localStorage.setItem('phantom_cf_limit', limit)
+      localStorage.setItem('phantom_cf_type', chatType)
+    }
+  }, [keywords, minMembers, limit, chatType])
 
   const handleSearch = async () => {
     if (!keywords.trim()) return alert('Введіть ключові слова')

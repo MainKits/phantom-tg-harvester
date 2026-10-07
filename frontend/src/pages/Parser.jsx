@@ -4,7 +4,7 @@ import { API } from '../apiConfig'
 
 export default function Parser() {
   const [chatLinks, setChatLinks] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_links') || '' : ''))
-  const [onlineFilter, setOnlineFilter] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_online') || '24' : '24'))
+  const [onlineFilter, setOnlineFilter] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_online') || '' : ''))
   const [activeOnly, setActiveOnly] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_active') === 'true' : false))
   const [skipAdmins, setSkipAdmins] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_skip_admin') !== 'false' : true))
   const [skipBots, setSkipBots] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_skip_bots') !== 'false' : true))
@@ -109,19 +109,28 @@ export default function Parser() {
     window.open(`${API}/api/parser/export/${format}`, '_blank')
   }
 
-  const handleFileUpload = async (e) => {
+  const handleFileUpload = (e) => {
     const file = e.target.files[0]
     if (!file) return
-    try {
-      const form = new FormData()
-      form.append('file', file)
-      const res = await fetch(`${API}/api/parser/upload-links`, { method: 'POST', body: form })
-      if (res.ok) {
-        const data = await res.json()
-        setChatLinks(data.links.join('\n'))
-        alert(`✅ Завантажено ${data.count} посилань з файлу`)
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target.result || ''
+      const lines = content
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#'))
+      
+      const existing = chatLinks.split('\n').map(l => l.trim()).filter(Boolean)
+      const combined = Array.from(new Set([...existing, ...lines])).join('\n')
+      setChatLinks(combined)
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('phantom_parser_links', combined)
       }
-    } catch { alert('Бекенд не запущено') }
+      alert(`✅ Імпортовано ${lines.length} каналів/чатів з ${file.name} (Всього: ${combined ? combined.split('\n').length : 0})`)
+    }
+    reader.readAsText(file, 'UTF-8')
     e.target.value = ''
   }
 

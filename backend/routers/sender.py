@@ -27,6 +27,7 @@ _active_task_loops: dict = {}
 async def create_send_task(
     message_text: str = Form(...),
     targets_file: str = Form(""),
+    targets_text: Optional[str] = Form(None),
     send_type: str = Form("users"),        # "users" | "chats" | "comments"
     repeat_interval: int = Form(0),
     spintax_enabled: bool = Form(True),
@@ -42,6 +43,14 @@ async def create_send_task(
         v = validate_spintax(message_text)
         if not v["valid"]:
             raise HTTPException(400, detail=f"Spintax error: {v['error']}")
+
+    if targets_text and targets_text.strip():
+        import time
+        filename = f"targets_{int(time.time())}.txt"
+        filepath = os.path.join(EXPORTS_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(targets_text.strip())
+        targets_file = filename
 
     db = await get_db()
     
@@ -217,17 +226,39 @@ async def _do_send_task(task_id: int):
                     msg = parse_spintax(message_text) if spintax_enabled else message_text
 
                     if send_type == "users":
-                        entity = await client.get_entity(target)
+                        clean_u = str(target).strip()
+                        if "t.me/" in clean_u:
+                            clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
+                        clean_u = clean_u.lstrip("@")
+                        if clean_u.isdigit():
+                            clean_u = int(clean_u)
+                        entity = await client.get_entity(clean_u)
                         await client.send_message(entity, msg)
 
                     elif send_type == "chats":
-                        entity = await client.get_entity(target)
-                        # Try join first (ignore if already member)
-                        try:
-                            await client(JoinChannelRequest(entity))
-                            await asyncio.sleep(2)
-                        except Exception:
-                            pass
+                        clean_c = str(target).strip()
+                        if "t.me/+" in clean_c or "joinchat/" in clean_c:
+                            invite_hash = clean_c.split("t.me/+")[1] if "t.me/+" in clean_c else clean_c.split("joinchat/")[1]
+                            invite_hash = invite_hash.split("/")[0].split("?")[0]
+                            from telethon.tl.functions.messages import ImportChatInviteRequest
+                            try:
+                                await client(ImportChatInviteRequest(invite_hash))
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
+                            entity = await client.get_entity(clean_c)
+                        else:
+                            if "t.me/" in clean_c:
+                                clean_c = clean_c.split("t.me/")[-1].split("/")[0].split("?")[0]
+                            clean_c = clean_c.lstrip("@")
+                            if clean_c.isdigit():
+                                clean_c = int(clean_c)
+                            entity = await client.get_entity(clean_c)
+                            try:
+                                await client(JoinChannelRequest(entity))
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
                         await client.send_message(entity, msg)
 
                     elif send_type == "comments":

@@ -35,10 +35,19 @@ async def upload_user_base(file: UploadFile = File(...)):
 async def create_invite_task(
     target_chat: str = Form(...),
     targets_file: str = Form(""),
+    targets_text: Optional[str] = Form(None),
     invites_per_account: int = Form(15),
     delay_min: int = Form(30),
     delay_max: int = Form(60),
 ):
+    if targets_text and targets_text.strip():
+        import time
+        filename = f"inv_targets_{int(time.time())}.txt"
+        filepath = os.path.join(EXPORTS_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(targets_text.strip())
+        targets_file = filename
+
     db = await get_db()
     # Ensure targets_file column exists (migration safety)
     try:
@@ -148,7 +157,13 @@ async def _do_invite_task(task_id: int):
 
         # Resolve target channel once per account session
         try:
-            channel_entity = await client.get_entity(target_chat)
+            clean_tc = target_chat.strip()
+            if "t.me/" in clean_tc and not ("t.me/+" in clean_tc or "joinchat/" in clean_tc):
+                clean_tc = clean_tc.split("t.me/")[-1].split("/")[0].split("?")[0]
+            clean_tc = clean_tc.lstrip("@")
+            if clean_tc.isdigit():
+                clean_tc = int(clean_tc)
+            channel_entity = await client.get_entity(clean_tc)
         except Exception as e:
             await log_event("warn", "inviter",
                             f"Task #{task_id}: cannot resolve {target_chat}: {e}")
@@ -166,7 +181,13 @@ async def _do_invite_task(task_id: int):
             target_index += 1
 
             try:
-                user_entity = await client.get_entity(user_str)
+                clean_u = user_str.strip()
+                if "t.me/" in clean_u:
+                    clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
+                clean_u = clean_u.lstrip("@")
+                if clean_u.isdigit():
+                    clean_u = int(clean_u)
+                user_entity = await client.get_entity(clean_u)
                 await client(InviteToChannelRequest(channel_entity, [user_entity]))
                 success_count += 1
                 sent_this_account += 1

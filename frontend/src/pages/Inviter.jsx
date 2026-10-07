@@ -3,51 +3,56 @@ import { Play, Square, Upload, Link } from 'lucide-react'
 import { API } from '../apiConfig'
 
 export default function Inviter() {
-  const [targetChat, setTargetChat] = useState('')
-  const [inviteLimit, setInviteLimit] = useState(15)
-  const [delayMin, setDelayMin] = useState(30)
-  const [delayMax, setDelayMax] = useState(60)
-  const [baseFile, setBaseFile] = useState(null)
-  const [baseCount, setBaseCount] = useState(0)
+  const [targetChat, setTargetChat] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_inv_chat') || '' : ''))
+  const [targetsText, setTargetsText] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_inv_targets') || '' : ''))
+  const [inviteLimit, setInviteLimit] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_inv_limit')) || 15 : 15))
+  const [delayMin, setDelayMin] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_inv_dmin')) || 30 : 30))
+  const [delayMax, setDelayMax] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_inv_dmax')) || 60 : 60))
   const [inviting, setInviting] = useState(false)
   const [taskId, setTaskId] = useState(null)
   const [invitedCount, setInvitedCount] = useState(0)
   const [errorCount, setErrorCount] = useState(0)
 
-  const handleBaseUpload = async (e) => {
+  const baseCount = targetsText.split('\n').filter(l => l.trim()).length
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('phantom_inv_chat', targetChat)
+      localStorage.setItem('phantom_inv_targets', targetsText)
+      localStorage.setItem('phantom_inv_limit', inviteLimit)
+      localStorage.setItem('phantom_inv_dmin', delayMin)
+      localStorage.setItem('phantom_inv_dmax', delayMax)
+    }
+  }, [targetChat, targetsText, inviteLimit, delayMin, delayMax])
+
+  const handleBaseUpload = (e) => {
     const file = e.target.files[0]
     if (!file) return
-    setBaseFile(file)
-    const text = await file.text()
-    const lines = text.split('\n').filter(l => l.trim()).length
-    setBaseCount(lines)
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target.result || ''
+      const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+      const existing = targetsText.split('\n').map(l => l.trim()).filter(Boolean)
+      const combined = Array.from(new Set([...existing, ...lines])).join('\n')
+      setTargetsText(combined)
+      if (typeof window !== 'undefined') localStorage.setItem('phantom_inv_targets', combined)
+      alert(`✅ Імпортовано ${lines.length} юзерів із файлу ${file.name}`)
+    }
+    reader.readAsText(file, 'UTF-8')
+    e.target.value = ''
   }
 
   const handleStart = async () => {
     if (!targetChat.trim()) return alert('Введіть посилання на канал/групу')
-    if (baseCount === 0 || !baseFile) return alert('Завантажте базу юзерів')
+    const cleanTargets = targetsText.trim()
+    if (!cleanTargets) return alert('Введіть або завантажте базу юзерів')
     setInviting(true)
     setInvitedCount(0)
     setErrorCount(0)
     try {
-      // 1. Upload base file
-      let targetsFile = ''
-      const baseForm = new FormData()
-      baseForm.append('file', baseFile)
-      const baseRes = await fetch(`${API}/api/inviter/upload-base`, { method: 'POST', body: baseForm })
-      if (baseRes.ok) {
-        const baseData = await baseRes.json()
-        targetsFile = baseData.saved_filename || ''
-      } else {
-        alert('Помилка завантаження бази')
-        setInviting(false)
-        return
-      }
-
-      // 2. Create task
       const form = new FormData()
-      form.append('target_chat', targetChat)
-      form.append('targets_file', targetsFile)
+      form.append('target_chat', targetChat.trim())
+      form.append('targets_text', cleanTargets)
       form.append('invites_per_account', inviteLimit)
       form.append('delay_min', delayMin)
       form.append('delay_max', delayMax)
@@ -56,6 +61,11 @@ export default function Inviter() {
         const data = await res.json()
         setTaskId(data.task_id)
         await fetch(`${API}/api/inviter/${data.task_id}/start`, { method: 'POST' })
+        alert('🚀 Інвайтинг успішно запущено!')
+      } else {
+        const err = await res.json().catch(() => ({}))
+        alert(err.detail || 'Помилка створення завдання')
+        setInviting(false)
       }
     } catch { 
       alert('Бекенд не запущено або помилка')
@@ -129,23 +139,30 @@ export default function Inviter() {
         <div className="card section">
           <div className="card-header">
             <span className="card-title"><Upload size={15} /> База користувачів</span>
-            {baseCount > 0 && <span className="badge active"><span className="badge-dot"></span> {baseCount} юзерів</span>}
-          </div>
-          {baseCount === 0 ? (
-            <label className="dropzone" style={{ cursor: 'pointer' }}>
-              <div className="dropzone-icon">👥</div>
-              <div className="dropzone-text">Завантажте спарсений список користувачів</div>
-              <div className="dropzone-hint">.txt файл з @username або ID</div>
-              <input type="file" accept=".txt,.csv" style={{ display: 'none' }} onChange={handleBaseUpload} />
-            </label>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                📄 <strong style={{ color: 'var(--text-primary)' }}>{baseFile?.name}</strong> — {baseCount} записів
-              </span>
-              <button className="btn btn-danger btn-sm" onClick={() => { setBaseFile(null); setBaseCount(0) }}>Скинути</button>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              {baseCount > 0 && <span className="badge active"><span className="badge-dot"></span> {baseCount} юзерів</span>}
+              <label className="btn btn-secondary btn-sm" style={{ cursor: 'pointer' }}>
+                <Upload size={13} /> Імпорт .txt
+                <input type="file" accept=".txt,.csv" style={{ display: 'none' }} onChange={handleBaseUpload} />
+              </label>
+              {baseCount > 0 && (
+                <button className="btn btn-danger btn-sm" onClick={() => setTargetsText('')}>
+                  Очистити
+                </button>
+              )}
             </div>
-          )}
+          </div>
+          <div className="input-group">
+            <label className="input-label">Введіть або вставте @username або ID користувачів (по одному на рядок):</label>
+            <textarea
+              className="textarea"
+              rows={4}
+              placeholder={"@username1\n@username2\n123456789"}
+              value={targetsText}
+              onChange={e => setTargetsText(e.target.value)}
+              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+            />
+          </div>
         </div>
 
         {/* Settings */}

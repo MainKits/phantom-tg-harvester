@@ -17,9 +17,9 @@ export default function AccountManager() {
   const [phoneHash, setPhoneHash] = useState('')
   const [authStep, setAuthStep] = useState('phone')
   const [authLoading, setAuthLoading] = useState(false)
-  const [apiId, setApiId] = useState('')
-  const [apiHash, setApiHash] = useState('')
-  const [apiConfigured, setApiConfigured] = useState(false)
+  const [apiId, setApiId] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_api_id') || '' : ''))
+  const [apiHash, setApiHash] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_api_hash') || '' : ''))
+  const [apiConfigured, setApiConfigured] = useState(() => (typeof window !== 'undefined' ? !!(localStorage.getItem('phantom_api_id') && localStorage.getItem('phantom_api_hash')) : false))
   const [checkingId, setCheckingId] = useState(null)
 
   // ── Join chat modal ──
@@ -45,8 +45,16 @@ export default function AccountManager() {
       const res = await fetch(`${API}/api/dashboard/settings`)
       if (res.ok) {
         const data = await res.json()
-        setApiConfigured(!!(data.settings?.api_id && data.settings?.api_hash))
-        if (data.settings?.api_id) setApiId(data.settings.api_id)
+        const hasKeys = !!(data.settings?.api_id && (data.settings?.api_hash || data.settings?.api_hash_masked))
+        setApiConfigured(hasKeys)
+        if (data.settings?.api_id) {
+          setApiId(data.settings.api_id)
+          if (typeof window !== 'undefined') localStorage.setItem('phantom_api_id', data.settings.api_id)
+        }
+        if (data.settings?.api_hash) {
+          setApiHash(data.settings.api_hash)
+          if (typeof window !== 'undefined') localStorage.setItem('phantom_api_hash', data.settings.api_hash)
+        }
       }
     } catch {}
   }
@@ -132,13 +140,20 @@ export default function AccountManager() {
   // ── API settings ──
   const handleSaveSettings = async () => {
     try {
+      const cleanId = apiId.trim()
+      const cleanHash = apiHash.trim()
       const form = new FormData()
-      form.append('api_id', apiId)
-      form.append('api_hash', apiHash)
+      form.append('api_id', cleanId)
+      form.append('api_hash', cleanHash)
       const res = await fetch(`${API}/api/dashboard/settings`, { method: 'POST', body: form })
       if (res.ok) {
-        setShowSettingsModal(false); setApiConfigured(true); setApiHash('')
-        alert('✅ API ключі збережено!')
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('phantom_api_id', cleanId)
+          localStorage.setItem('phantom_api_hash', cleanHash)
+        }
+        setShowSettingsModal(false)
+        setApiConfigured(true)
+        alert('✅ API ключі успішно збережено!')
       }
     } catch { alert('Бекенд не запущено') }
   }

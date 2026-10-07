@@ -139,6 +139,23 @@ async def activate_key(key: str = Form(...)):
     row = await cursor.fetchone()
 
     if not row:
+        # Check Supabase cloud fallback
+        sb = get_supabase_client()
+        if sb:
+            try:
+                res = sb.table("license_keys").select("*").eq("key", clean_key).execute()
+                if res.data:
+                    k_data = res.data[0]
+                    await db.execute(
+                        "INSERT OR REPLACE INTO license_keys (key, status, activated_at, expires_at, note) VALUES (?, ?, ?, ?, ?)",
+                        (k_data.get("key"), k_data.get("status", "active"), k_data.get("activated_at"), str(k_data.get("expires_at", "")), k_data.get("note", ""))
+                    )
+                    await db.commit()
+                    row = (k_data.get("key"), k_data.get("status", "active"), str(k_data.get("expires_at", "")))
+            except Exception as e:
+                print(f"[Supabase] activate lookup error: {e}")
+
+    if not row:
         await db.close()
         raise HTTPException(400, "Невірний ключ ліцензії")
 
@@ -157,9 +174,10 @@ async def activate_key(key: str = Form(...)):
         pass
 
     # Mark as active
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     await db.execute(
         "UPDATE license_keys SET status = 'active', activated_at = ? WHERE key = ?",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), clean_key)
+        (now_str, clean_key)
     )
     # Store in settings as active license
     await db.execute(
@@ -168,6 +186,17 @@ async def activate_key(key: str = Form(...)):
     )
     await db.commit()
     await db.close()
+
+    # Sync back to Supabase
+    sync_to_supabase_async("license_keys", {
+        "key": clean_key,
+        "status": "active",
+        "activated_at": now_str
+    }, on_conflict="key")
+    sync_to_supabase_async("settings", {
+        "key": "active_license",
+        "value": clean_key
+    }, on_conflict="key")
 
     return {"success": True, "expires_at": expires_at, "message": "Ліцензія активована!"}
 
@@ -189,6 +218,24 @@ async def get_status(key: Optional[str] = None):
             (clean_key,)
         )
         lic = await cursor.fetchone()
+
+        if not lic:
+            # Check Supabase cloud
+            sb = get_supabase_client()
+            if sb:
+                try:
+                    res = sb.table("license_keys").select("*").eq("key", clean_key).execute()
+                    if res.data:
+                        k_data = res.data[0]
+                        lic = (str(k_data.get("expires_at", "")), k_data.get("status", "active"))
+                        await db.execute(
+                            "INSERT OR REPLACE INTO license_keys (key, status, activated_at, expires_at, note) VALUES (?, ?, ?, ?, ?)",
+                            (k_data.get("key"), k_data.get("status", "active"), k_data.get("activated_at"), str(k_data.get("expires_at", "")), k_data.get("note", ""))
+                        )
+                        await db.commit()
+                except Exception as e:
+                    print(f"[Supabase] get_status lookup note: {e}")
+
         await db.close()
 
         if not lic:

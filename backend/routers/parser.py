@@ -90,25 +90,55 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                 except Exception:
                     pass
 
-            entity = await client.get_entity(clean_link)
+            entity = None
+            try:
+                # First try resolving by username/clean_link
+                if not ("t.me/+" in clean_link or "joinchat/" in clean_link):
+                    try:
+                        entity = await client.get_entity(chat_name)
+                    except Exception:
+                        entity = await client.get_entity(clean_link)
+                else:
+                    entity = await client.get_entity(clean_link)
+            except Exception as ent_err:
+                await log_event("warn", "parser", f"Не вдалося знайти {chat_name}: {ent_err}")
+                continue
+
             participants = []
 
             # 1. Try get_participants (works for groups and supergroups)
             try:
-                participants = await client.get_participants(entity, limit=2000)
-            except Exception as pe:
-                # 2. Channel fallback: parse commenters and authors from recent posts
-                seen_ids = set()
+                participants = await client.get_participants(entity, limit=3000)
+            except Exception:
+                pass
+
+            # 2. If channel or 0 participants, check for linked discussion group
+            if not participants:
                 try:
-                    async for msg in client.iter_messages(entity, limit=150):
+                    from telethon.tl.functions.channels import GetFullChannelRequest
+                    full_res = await client(GetFullChannelRequest(entity))
+                    linked_chat_id = getattr(getattr(full_res, 'full_chat', None), 'linked_chat_id', None)
+                    if linked_chat_id:
+                        linked_entity = await client.get_entity(linked_chat_id)
+                        participants = await client.get_participants(linked_entity, limit=3000)
+                except Exception:
+                    pass
+
+            # 3. Fallback: parse commenters and authors from recent posts
+            if not participants or len(participants) < 10:
+                seen_ids = {getattr(p, 'id', None) for p in participants if getattr(p, 'id', None)}
+                try:
+                    async for msg in client.iter_messages(entity, limit=200):
                         if msg.sender and hasattr(msg.sender, 'id') and msg.sender.id not in seen_ids:
                             seen_ids.add(msg.sender.id)
+                            setattr(msg.sender, '_active_writer', True)
                             participants.append(msg.sender)
                         if getattr(msg, 'replies', None) and getattr(msg.replies, 'replies', 0) > 0:
                             try:
                                 async for reply in client.iter_messages(entity, reply_to=msg.id, limit=50):
                                     if reply.sender and hasattr(reply.sender, 'id') and reply.sender.id not in seen_ids:
                                         seen_ids.add(reply.sender.id)
+                                        setattr(reply.sender, '_active_writer', True)
                                         participants.append(reply.sender)
                             except Exception:
                                 pass
@@ -126,9 +156,11 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                 if getattr(user, 'deleted', False):
                     continue
 
+                is_active_writer = 1 if getattr(user, '_active_writer', False) else 0
+
                 # Check online filter
-                last_online_str = ""
-                is_recent = False
+                last_online_str = "Нещодавно"
+                is_recent = True
                 status = getattr(user, 'status', None)
                 if isinstance(status, UserStatusOnline):
                     last_online_str = "Online"
@@ -138,10 +170,10 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                     is_recent = True
                 elif isinstance(status, UserStatusLastWeek):
                     last_online_str = "Цього тижня"
-                    is_recent = online_filter and online_filter >= 168
+                    is_recent = (not online_filter) or (online_filter >= 72)
                 elif isinstance(status, UserStatusLastMonth):
                     last_online_str = "Цього місяця"
-                    is_recent = False
+                    is_recent = (not online_filter) or (online_filter >= 300)
                 elif hasattr(status, 'was_online') and status and status.was_online:
                     dt = status.was_online
                     last_online_str = dt.strftime("%d.%m.%Y %H:%M")
@@ -153,9 +185,9 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                         is_recent = True
                 else:
                     last_online_str = "Невідомо"
-                    is_recent = not online_filter  # pass if no filter
+                    is_recent = True if (not online_filter or is_active_writer) else False
 
-                if online_filter and not is_recent:
+                if online_filter and not is_recent and not is_active_writer:
                     continue
 
                 u_first = getattr(user, 'first_name', '') or ''
@@ -164,7 +196,7 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                 
                 users_to_insert.append((
                     user.id, u_name, u_first, u_last,
-                    chat_name, last_online_str, 0
+                    chat_name, last_online_str, is_active_writer
                 ))
 
                 supabase_users.append({
@@ -173,7 +205,7 @@ async def _do_parse(links, online_filter, active_writers_only, skip_admins, skip
                     "first_name": u_first,
                     "last_name": u_last,
                     "source_chat": chat_name,
-                    "is_active_writer": 0
+                    "is_active_writer": is_active_writer
                 })
 
             if users_to_insert:

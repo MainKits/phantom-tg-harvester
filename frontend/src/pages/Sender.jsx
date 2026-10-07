@@ -1,17 +1,16 @@
-import { useState } from 'react'
-import { Upload, Image, Play, Square, Eye, MessageSquare } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Upload, Image, Play, Square, Eye, MessageSquare, Trash2 } from 'lucide-react'
 import { API } from '../apiConfig'
 
 export default function Sender() {
   const [message, setMessage] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_msg') || '' : ''))
+  const [targetsText, setTargetsText] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_targets') || '' : ''))
   const [limit, setLimit] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_limit')) || 35 : 35))
   const [delayMin, setDelayMin] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_delay_min')) || 45 : 45))
   const [delayMax, setDelayMax] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_delay_max')) || 120 : 120))
   const [autoResponder, setAutoResponder] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_ar') === 'true' : false))
   const [keywords, setKeywords] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_kw') || 'так, цікаво, да, yes, +' : 'так, цікаво, да, yes, +'))
   const [forwardTo, setForwardTo] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_forward') || '' : ''))
-  const [baseFile, setBaseFile] = useState(null)
-  const [baseCount, setBaseCount] = useState(0)
   const [sending, setSending] = useState(false)
   const [preview, setPreview] = useState('')
   const [mediaFile, setMediaFile] = useState(null)
@@ -22,9 +21,12 @@ export default function Sender() {
   const [sendType, setSendType] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_type') || 'users' : 'users'))
   const [repeatInterval, setRepeatInterval] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_interval')) || 15 : 15))
 
+  const baseCount = targetsText.split('\n').filter(l => l.trim()).length
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('phantom_sender_msg', message)
+      localStorage.setItem('phantom_sender_targets', targetsText)
       localStorage.setItem('phantom_sender_type', sendType)
       localStorage.setItem('phantom_sender_limit', limit)
       localStorage.setItem('phantom_sender_delay_min', delayMin)
@@ -34,7 +36,7 @@ export default function Sender() {
       localStorage.setItem('phantom_sender_kw', keywords)
       localStorage.setItem('phantom_sender_forward', forwardTo)
     }
-  }, [message, sendType, limit, delayMin, delayMax, repeatInterval, autoResponder, keywords, forwardTo])
+  }, [message, targetsText, sendType, limit, delayMin, delayMax, repeatInterval, autoResponder, keywords, forwardTo])
 
   const generatePreview = () => {
     if (!message.trim()) return
@@ -45,13 +47,29 @@ export default function Sender() {
     setPreview(result)
   }
 
-  const handleBaseUpload = async (e) => {
+  const handleBaseUpload = (e) => {
     const file = e.target.files[0]
     if (!file) return
-    setBaseFile(file)
-    const text = await file.text()
-    const lines = text.split('\n').filter(l => l.trim()).length
-    setBaseCount(lines)
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target.result || ''
+      const lines = content
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#'))
+      
+      const existing = targetsText.split('\n').map(l => l.trim()).filter(Boolean)
+      const combined = Array.from(new Set([...existing, ...lines])).join('\n')
+      setTargetsText(combined)
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('phantom_sender_targets', combined)
+      }
+      alert(`✅ Імпортовано ${lines.length} рядків із файлу ${file.name}`)
+    }
+    reader.readAsText(file, 'UTF-8')
+    e.target.value = ''
   }
 
   const handleMediaUpload = (e) => {
@@ -61,30 +79,17 @@ export default function Sender() {
 
   const handleStart = async () => {
     if (!message.trim()) return alert('Введіть текст повідомлення')
-    if (baseCount === 0 || !baseFile) return alert(sendType === 'users' ? 'Завантажте базу юзерів' : 'Завантажте список чатів')
+    const cleanTargets = targetsText.trim()
+    if (!cleanTargets) {
+      return alert(sendType === 'users' ? 'Введіть або завантажте базу юзерів' : 'Введіть або завантажте список чатів/каналів')
+    }
     setSending(true)
     setSentCount(0)
     setErrorCount(0)
     try {
-      // 1. Upload base file
-      let targetsFile = ''
-      const baseForm = new FormData()
-      baseForm.append('file', baseFile)
-      const baseRes = await fetch(`${API}/api/sender/upload-base`, { method: 'POST', body: baseForm })
-      if (baseRes.ok) {
-        const baseData = await baseRes.json()
-        targetsFile = baseData.saved_filename || ''
-      } else {
-        const errJson = await baseRes.json().catch(() => ({}))
-        alert(errJson.detail || 'Помилка завантаження бази')
-        setSending(false)
-        return
-      }
-
-      // 2. Create task
       const form = new FormData()
       form.append('message_text', message)
-      form.append('targets_file', targetsFile)
+      form.append('targets_text', cleanTargets)
       form.append('send_type', sendType)
       form.append('repeat_interval', repeatInterval)
       form.append('spintax_enabled', 'true')
@@ -94,11 +99,13 @@ export default function Sender() {
       form.append('auto_responder_enabled', autoResponder)
       form.append('auto_responder_keywords', JSON.stringify((keywords || '').split(',').map(k => k.trim())))
       form.append('forward_to_account', forwardTo || '')
+      
       const res = await fetch(`${API}/api/sender/create-task`, { method: 'POST', body: form })
       if (res.ok) {
         const data = await res.json()
         setTaskId(data.task_id)
         await fetch(`${API}/api/sender/${data.task_id}/start`, { method: 'POST' })
+        alert('🚀 Розсилка успішно запущена!')
       } else {
         const errJson = await res.json().catch(() => ({}))
         alert(errJson.detail || 'Помилка створення завдання')
@@ -167,47 +174,56 @@ export default function Sender() {
           </button>
         </div>
 
-        {/* Base upload */}
+        {/* Base targets editor and upload */}
         <div className="card section">
           <div className="card-header">
             <span className="card-title">
-              <Upload size={15} /> Завантаження бази {
+              <Upload size={15} /> База для розсилки: {
                 sendType === 'combo' 
-                  ? 'чатів та каналів (змішаний список)' 
+                  ? 'чати та канали' 
                   : sendType === 'comments' 
-                    ? 'каналів/постів' 
+                    ? 'канали/пости' 
                     : sendType === 'chats' 
-                      ? 'чатів' 
-                      : 'юзерів'
+                      ? 'чати' 
+                      : 'юзери (ЛС)'
               }
             </span>
-            {baseCount > 0 && <span className="badge active"><span className="badge-dot"></span> {baseCount} записів</span>}
-          </div>
-          {baseCount === 0 ? (
-            <label className="dropzone" style={{ cursor: 'pointer' }}>
-              <div className="dropzone-icon">📄</div>
-              <div className="dropzone-text">
-                Натисніть для завантаження бази {
-                  sendType === 'combo'
-                    ? 'посилань на чати та канали (програма автоматично визначить чат чи канал)'
-                    : sendType === 'comments' 
-                      ? 'каналів (@channel або https://t.me/channel/123)' 
-                      : sendType === 'chats' 
-                        ? 'чатів (@chat або https://t.me/+hash)' 
-                        : 'юзерів (@username або ID)'
-                }
-              </div>
-              <div className="dropzone-hint">.txt файл, посилання або юзернейми по одному на рядок</div>
-              <input type="file" accept=".txt,.csv" style={{ display: 'none' }} onChange={handleBaseUpload} />
-            </label>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                📄 <strong style={{ color: 'var(--text-primary)' }}>{baseFile?.name}</strong> — {baseCount} записів
-              </span>
-              <button className="btn btn-danger btn-sm" onClick={() => { setBaseFile(null); setBaseCount(0) }}>Скинути</button>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              {baseCount > 0 && <span className="badge active"><span className="badge-dot"></span> {baseCount} записів</span>}
+              <label className="btn btn-secondary btn-sm" style={{ cursor: 'pointer' }}>
+                <Upload size={13} /> Імпорт .txt
+                <input type="file" accept=".txt,.csv" style={{ display: 'none' }} onChange={handleBaseUpload} />
+              </label>
+              {baseCount > 0 && (
+                <button className="btn btn-danger btn-sm" onClick={() => setTargetsText('')}>
+                  <Trash2 size={13} /> Очистити
+                </button>
+              )}
             </div>
-          )}
+          </div>
+          <div className="input-group">
+            <label className="input-label">
+              Введіть {
+                sendType === 'users' ? 'юзернейми (@username або ID)' :
+                sendType === 'chats' ? 'посилання на чати/групи (@chat або https://t.me/chat)' :
+                sendType === 'comments' ? 'посилання на канали (@channel або https://t.me/channel/123)' :
+                'список чатів та каналів (@channel, @chat або посилання)'
+              } — по одному на рядок або імпортуйте з файлу:
+            </label>
+            <textarea
+              className="textarea"
+              rows={4}
+              placeholder={
+                sendType === 'users' ? "@username1\n@username2\nhttps://t.me/user3" :
+                sendType === 'chats' ? "@group1\nhttps://t.me/group2\nhttps://t.me/+joinhash" :
+                sendType === 'comments' ? "@channel1\nhttps://t.me/channel/100" :
+                "@group1\n@channel1\nhttps://t.me/chat2"
+              }
+              value={targetsText}
+              onChange={e => setTargetsText(e.target.value)}
+              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+            />
+          </div>
         </div>
 
         {/* Message editor */}
