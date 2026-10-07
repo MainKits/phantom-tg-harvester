@@ -44,6 +44,14 @@ async def create_send_task(
             raise HTTPException(400, detail=f"Spintax error: {v['error']}")
 
     db = await get_db()
+    
+    # Verify active accounts exist
+    acc_cur = await db.execute("SELECT COUNT(*) FROM accounts WHERE status = 'active'")
+    acc_row = await acc_cur.fetchone()
+    if not acc_row or acc_row[0] == 0:
+        await db.close()
+        raise HTTPException(400, detail="Немає активних акаунтів для розсилки. Додайте або авторизуйте акаунти у вкладці Account Manager.")
+
     cursor = await db.execute(
         """INSERT INTO send_tasks
         (send_type, repeat_interval, targets_file, message_text, spintax_enabled,
@@ -78,7 +86,18 @@ async def upload_media(file: UploadFile = File(...)):
 @router.post("/upload-base")
 async def upload_user_base(file: UploadFile = File(...)):
     content = await file.read()
-    users = [l.strip() for l in content.decode("utf-8").strip().split("\n") if l.strip()]
+    
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "windows-1251", "cp1251", "latin-1"):
+        try:
+            text = content.decode(enc)
+            break
+        except Exception:
+            pass
+    if text is None:
+        text = content.decode("utf-8", errors="ignore")
+
+    users = [l.strip() for l in text.strip().split("\n") if l.strip()]
 
     import time
     filename = f"base_{int(time.time())}_{file.filename}"

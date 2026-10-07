@@ -77,10 +77,10 @@ async def get_stats():
     row = await cursor.fetchone()
     
     today_stats = {
-        "messages_sent": row[2] if row else 0,
-        "invites_sent": row[3] if row else 0,
-        "users_parsed": row[4] if row else 0,
-        "errors_count": row[5] if row else 0,
+        "messages_sent": row[1] if row and len(row) > 1 else 0,
+        "invites_sent": row[2] if row and len(row) > 2 else 0,
+        "errors_count": row[3] if row and len(row) > 3 else 0,
+        "users_parsed": total_parsed,
     }
     
     # Spam-blocked accounts

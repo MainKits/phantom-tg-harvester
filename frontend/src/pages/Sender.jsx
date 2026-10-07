@@ -61,7 +61,8 @@ export default function Sender() {
         const baseData = await baseRes.json()
         targetsFile = baseData.saved_filename || ''
       } else {
-        alert('Помилка завантаження бази')
+        const errJson = await baseRes.json().catch(() => ({}))
+        alert(errJson.detail || 'Помилка завантаження бази')
         setSending(false)
         return
       }
@@ -77,16 +78,23 @@ export default function Sender() {
       form.append('delay_min', delayMin)
       form.append('delay_max', delayMax)
       form.append('auto_responder_enabled', autoResponder)
-      form.append('auto_responder_keywords', JSON.stringify(keywords.split(',').map(k => k.trim())))
-      form.append('forward_to_account', forwardTo)
+      form.append('auto_responder_keywords', JSON.stringify((keywords || '').split(',').map(k => k.trim())))
+      form.append('forward_to_account', forwardTo || '')
       const res = await fetch(`${API}/api/sender/create-task`, { method: 'POST', body: form })
       if (res.ok) {
         const data = await res.json()
         setTaskId(data.task_id)
         await fetch(`${API}/api/sender/${data.task_id}/start`, { method: 'POST' })
+      } else {
+        const errJson = await res.json().catch(() => ({}))
+        alert(errJson.detail || 'Помилка створення завдання')
+        setSending(false)
+        return
       }
-    } catch { 
-      alert('Бекенд не запущено або помилка')
+    } catch (err) { 
+      alert(err.message === 'Failed to fetch' 
+        ? 'Сервер на Render прокидається після сну (займає ~30-50 сек). Зачекайте півхвилини та спробуйте ще раз.'
+        : `Помилка: ${err.message || 'Не вдалося запустити розсилку'}`)
       setSending(false)
     }
   }
