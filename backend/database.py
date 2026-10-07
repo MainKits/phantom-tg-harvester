@@ -182,8 +182,11 @@ async def init_db():
     await db.commit()
     await db.close()
 
-    # Cloud sync with Supabase
-    asyncio.create_task(sync_from_supabase())
+    # Cloud sync with Supabase (await hydration before serving traffic)
+    try:
+        await sync_from_supabase()
+    except Exception as e:
+        print(f"[Supabase] Startup sync error: {e}")
 
 
 async def sync_from_supabase():

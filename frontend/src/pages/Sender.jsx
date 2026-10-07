@@ -3,13 +3,13 @@ import { Upload, Image, Play, Square, Eye, MessageSquare } from 'lucide-react'
 import { API } from '../apiConfig'
 
 export default function Sender() {
-  const [message, setMessage] = useState('')
-  const [limit, setLimit] = useState(35)
-  const [delayMin, setDelayMin] = useState(45)
-  const [delayMax, setDelayMax] = useState(120)
-  const [autoResponder, setAutoResponder] = useState(false)
-  const [keywords, setKeywords] = useState('так, цікаво, да, yes, +')
-  const [forwardTo, setForwardTo] = useState('')
+  const [message, setMessage] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_msg') || '' : ''))
+  const [limit, setLimit] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_limit')) || 35 : 35))
+  const [delayMin, setDelayMin] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_delay_min')) || 45 : 45))
+  const [delayMax, setDelayMax] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_delay_max')) || 120 : 120))
+  const [autoResponder, setAutoResponder] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_ar') === 'true' : false))
+  const [keywords, setKeywords] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_kw') || 'так, цікаво, да, yes, +' : 'так, цікаво, да, yes, +'))
+  const [forwardTo, setForwardTo] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_forward') || '' : ''))
   const [baseFile, setBaseFile] = useState(null)
   const [baseCount, setBaseCount] = useState(0)
   const [sending, setSending] = useState(false)
@@ -19,8 +19,22 @@ export default function Sender() {
   const [sentCount, setSentCount] = useState(0)
   const [errorCount, setErrorCount] = useState(0)
 
-  const [sendType, setSendType] = useState('users') // 'users' or 'chats'
-  const [repeatInterval, setRepeatInterval] = useState(15) // minutes
+  const [sendType, setSendType] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_sender_type') || 'users' : 'users'))
+  const [repeatInterval, setRepeatInterval] = useState(() => (typeof window !== 'undefined' ? parseInt(localStorage.getItem('phantom_sender_interval')) || 15 : 15))
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('phantom_sender_msg', message)
+      localStorage.setItem('phantom_sender_type', sendType)
+      localStorage.setItem('phantom_sender_limit', limit)
+      localStorage.setItem('phantom_sender_delay_min', delayMin)
+      localStorage.setItem('phantom_sender_delay_max', delayMax)
+      localStorage.setItem('phantom_sender_interval', repeatInterval)
+      localStorage.setItem('phantom_sender_ar', autoResponder)
+      localStorage.setItem('phantom_sender_kw', keywords)
+      localStorage.setItem('phantom_sender_forward', forwardTo)
+    }
+  }, [message, sendType, limit, delayMin, delayMax, repeatInterval, autoResponder, keywords, forwardTo])
 
   const generatePreview = () => {
     if (!message.trim()) return

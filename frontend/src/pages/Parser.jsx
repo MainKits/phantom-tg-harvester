@@ -3,16 +3,26 @@ import { Search, Play, Square, Download, Trash2, Filter, Upload, RefreshCw } fro
 import { API } from '../apiConfig'
 
 export default function Parser() {
-  const [chatLinks, setChatLinks] = useState('')
-  const [onlineFilter, setOnlineFilter] = useState('24')
-  const [activeOnly, setActiveOnly] = useState(false)
-  const [skipAdmins, setSkipAdmins] = useState(true)
-  const [skipBots, setSkipBots] = useState(true)
+  const [chatLinks, setChatLinks] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_links') || '' : ''))
+  const [onlineFilter, setOnlineFilter] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_online') || '24' : '24'))
+  const [activeOnly, setActiveOnly] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_active') === 'true' : false))
+  const [skipAdmins, setSkipAdmins] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_skip_admin') !== 'false' : true))
+  const [skipBots, setSkipBots] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_parser_skip_bots') !== 'false' : true))
   const [parsing, setParsing] = useState(false)
   const [progress, setProgress] = useState(null)
   const [users, setUsers] = useState([])
   const [totalParsed, setTotalParsed] = useState(0)
   const pollRef = useRef(null)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('phantom_parser_links', chatLinks)
+      localStorage.setItem('phantom_parser_online', onlineFilter)
+      localStorage.setItem('phantom_parser_active', activeOnly)
+      localStorage.setItem('phantom_parser_skip_admin', skipAdmins)
+      localStorage.setItem('phantom_parser_skip_bots', skipBots)
+    }
+  }, [chatLinks, onlineFilter, activeOnly, skipAdmins, skipBots])
 
   const fetchUsers = async () => {
     try {

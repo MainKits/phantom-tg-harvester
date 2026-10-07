@@ -15,12 +15,12 @@ import { API } from './apiConfig'
 import './index.css'
 
 function App() {
-  const [licenseChecked, setLicenseChecked] = useState(false)
-  const [licensed, setLicensed] = useState(false)
+  const savedKey = typeof window !== 'undefined' ? localStorage.getItem('phantom_license_key') : null
+  const [licenseChecked, setLicenseChecked] = useState(!!savedKey)
+  const [licensed, setLicensed] = useState(!!savedKey)
   const [backendOnline, setBackendOnline] = useState(true)
 
   const checkLicense = async () => {
-    const savedKey = typeof window !== 'undefined' ? localStorage.getItem('phantom_license_key') : null
 
     // If key is saved locally, keep user logged in immediately (no flicker / wait)
     if (savedKey) {

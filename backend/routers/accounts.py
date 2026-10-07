@@ -22,6 +22,16 @@ async def list_accounts():
     db = await get_db()
     cursor = await db.execute("SELECT * FROM accounts ORDER BY created_at DESC")
     rows = await cursor.fetchall()
+
+    # If local cache is empty, pull immediately from Supabase cloud
+    if not rows:
+        from ..database import sync_from_supabase
+        try:
+            await sync_from_supabase()
+            cursor = await db.execute("SELECT * FROM accounts ORDER BY created_at DESC")
+            rows = await cursor.fetchall()
+        except Exception:
+            pass
     
     accounts = []
     for row in rows:
@@ -240,6 +250,16 @@ async def delete_account(account_id: int):
     
     await db.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
     await db.commit()
+
+    # Delete from Supabase cloud
+    from ..database import get_supabase_client
+    sb = get_supabase_client()
+    if sb and row[0]:
+        try:
+            sb.table("accounts").delete().eq("phone", row[0]).execute()
+        except Exception:
+            pass
+
     await log_event("info", "accounts", f"Account {row[0]} deleted")
     await db.close()
     
