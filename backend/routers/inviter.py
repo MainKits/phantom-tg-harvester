@@ -5,6 +5,7 @@ Inviter API — invite users to Telegram channels/groups with multi-account rota
 import os
 import asyncio
 import random
+from typing import Optional
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from ..database import get_db, log_event
 
