@@ -113,10 +113,24 @@ async def get_stats():
     )
     row = await cursor.fetchone()
     
+    if row:
+        if len(row) > 1 and isinstance(row[1], str):
+            # Legacy schema: (id, date, messages_sent, invites_sent, users_parsed, errors_count)
+            msg_sent = row[2] if len(row) > 2 and isinstance(row[2], int) else 0
+            inv_sent = row[3] if len(row) > 3 and isinstance(row[3], int) else 0
+            err_cnt = row[5] if len(row) > 5 and isinstance(row[5], int) else 0
+        else:
+            # Current schema: (date, sent_total, invited_total, failed_total)
+            msg_sent = row[1] if len(row) > 1 and isinstance(row[1], int) else 0
+            inv_sent = row[2] if len(row) > 2 and isinstance(row[2], int) else 0
+            err_cnt = row[3] if len(row) > 3 and isinstance(row[3], int) else 0
+    else:
+        msg_sent, inv_sent, err_cnt = 0, 0, 0
+
     today_stats = {
-        "messages_sent": row[1] if row and len(row) > 1 else 0,
-        "invites_sent": row[2] if row and len(row) > 2 else 0,
-        "errors_count": row[3] if row and len(row) > 3 else 0,
+        "messages_sent": msg_sent,
+        "invites_sent": inv_sent,
+        "errors_count": err_cnt,
         "users_parsed": total_parsed,
     }
     
