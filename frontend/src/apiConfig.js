@@ -5,13 +5,20 @@ export const DEFAULT_CLOUD_API = 'https://phantom-tg-harvester.onrender.com'
 
 const getApiUrl = () => {
   if (typeof window !== 'undefined') {
-    // 1. Explicit user override in localStorage
+    const { hostname } = window.location
+    const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === ''
+
+    // 1. Explicit user override in localStorage (ignore dead render URLs on localhost)
     const saved = localStorage.getItem('phantom_api_url')
-    if (saved && saved.trim()) return saved.trim().replace(/\/+$/, '')
+    if (saved && saved.trim()) {
+      const clean = saved.trim().replace(/\/+$/, '')
+      if (!isLocal || !clean.includes('onrender.com')) {
+        return clean
+      }
+    }
 
     // 2. Local dev or Electron desktop
-    const { hostname } = window.location
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '') {
+    if (isLocal) {
       return 'http://127.0.0.1:8000'
     }
   }

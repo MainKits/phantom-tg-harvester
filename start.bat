@@ -9,7 +9,7 @@ echo.
 
 :: Start backend
 echo [1/2] Starting Python backend on port 8000...
-start "Phantom Backend" cmd /k "cd /d %~dp0 && python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000"
+start "Phantom Backend" cmd /k "cd /d %~dp0 && python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000"
 
 :: Wait for backend to initialize
 timeout /t 3 /nobreak > nul
@@ -27,6 +27,6 @@ echo   Frontend: http://localhost:5173
 echo   Backend:  http://localhost:8000
 echo  ========================================
 echo.
-echo  Press any key to open in browser...
-pause > nul
+echo  Opening browser at http://localhost:5173 ...
 start http://localhost:5173
+

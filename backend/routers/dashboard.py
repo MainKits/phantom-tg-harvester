@@ -101,6 +101,11 @@ async def get_stats():
     row = await cursor.fetchone()
     total_accounts = row[0] if row else 0
     
+    # Total parsed users
+    cursor = await db.execute("SELECT COUNT(*) FROM parsed_users")
+    row_parsed = await cursor.fetchone()
+    total_parsed = row_parsed[0] if row_parsed else 0
+
     # Today's stats
     today = datetime.now().strftime("%Y-%m-%d")
     cursor = await db.execute(
@@ -128,11 +133,6 @@ async def get_stats():
     )
     row = await cursor.fetchone()
     banned = row[0] if row else 0
-    
-    # Total parsed users
-    cursor = await db.execute("SELECT COUNT(*) FROM parsed_users")
-    row = await cursor.fetchone()
-    total_parsed = row[0] if row else 0
     
     await db.close()
     
