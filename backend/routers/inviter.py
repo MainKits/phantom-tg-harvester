@@ -283,6 +283,30 @@ async def delete_invite_task(task_id: int):
     return {"success": True}
 
 
+@router.get("/active-task")
+async def get_active_invite_task():
+    db = await get_db()
+    cursor = await db.execute("SELECT * FROM invite_tasks WHERE status = 'running' ORDER BY id DESC LIMIT 1")
+    row = await cursor.fetchone()
+    await db.close()
+    if not row:
+        return {"active": False, "task": None}
+    return {
+        "active": True,
+        "task": {
+            "id": row["id"] if "id" in row.keys() else row[0],
+            "target_chat": row["target_chat"] if "target_chat" in row.keys() else row[1],
+            "invites_per_account": row["invites_per_account"] if "invites_per_account" in row.keys() else row[2],
+            "delay_min": row["delay_min"] if "delay_min" in row.keys() else row[3],
+            "delay_max": row["delay_max"] if "delay_max" in row.keys() else row[4],
+            "status": row["status"] if "status" in row.keys() else row[5],
+            "total_invited": row["total_invited"] if "total_invited" in row.keys() else row[6],
+            "total_failed": row["total_failed"] if "total_failed" in row.keys() else row[7],
+            "created_at": str(row["created_at"] if "created_at" in row.keys() else row[8]),
+        }
+    }
+
+
 @router.get("/tasks")
 async def list_invite_tasks():
     db = await get_db()
@@ -299,3 +323,4 @@ async def list_invite_tasks():
             "created_at": row[8],
         })
     return {"tasks": tasks}
+

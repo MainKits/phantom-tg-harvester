@@ -155,25 +155,30 @@ async def _do_send_task(task_id: int):
     if not task:
         return
 
-    send_type        = task[1]
-    repeat_interval  = task[2] or 0
-    targets_file     = task[3]
-    message_text     = task[4]
-    spintax_enabled  = bool(task[5])
-    per_account      = task[6] or 35
-    delay_min        = task[7] or 45
-    delay_max        = task[8] or 120
+    try:
+        # Use named column access from aiosqlite.Row
+        send_type        = task["send_type"] if "send_type" in task.keys() else "users"
+        repeat_interval  = int((task["repeat_interval"] if "repeat_interval" in task.keys() else 0) or 0)
+        targets_file     = str((task["targets_file"] if "targets_file" in task.keys() else "") or "")
+        message_text     = str(task["message_text"] if "message_text" in task.keys() else "")
+        spintax_enabled  = bool(task["spintax_enabled"] if "spintax_enabled" in task.keys() else True)
+        per_account      = int((task["messages_per_account"] if "messages_per_account" in task.keys() else 35) or 35)
+        delay_min        = int((task["delay_min"] if "delay_min" in task.keys() else 45) or 45)
+        delay_max        = int((task["delay_max"] if "delay_max" in task.keys() else 120) or 120)
+    except Exception as parse_e:
+        await log_event("error", "sender", f"Task #{task_id} config parsing error: {parse_e}")
+        return
 
     # Load targets
     targets = []
     if targets_file:
-        path = os.path.join(EXPORTS_DIR, targets_file)
+        path = os.path.join(EXPORTS_DIR, targets_file.strip())
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 targets = [l.strip() for l in f if l.strip()]
 
     if not targets:
-        await log_event("warn", "sender", f"Task #{task_id}: no targets found")
+        await log_event("warn", "sender", f"Task #{task_id}: no targets found in {targets_file}")
         db = await get_db()
         await db.execute("UPDATE send_tasks SET status = 'done' WHERE id = ?", (task_id,))
         await db.commit()
@@ -259,7 +264,19 @@ async def _do_send_task(task_id: int):
                                 await asyncio.sleep(2)
                             except Exception:
                                 pass
-                        await client.send_message(entity, msg)
+                        try:
+                            await client.send_message(entity, msg)
+                        except Exception as send_err:
+                            err_str = str(send_err)
+                            if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                # Channel does not allow direct posts, comment on latest post
+                                post_id = 1
+                                async for m in client.iter_messages(entity, limit=1):
+                                    post_id = m.id
+                                    break
+                                await telegram_engine.post_comment(client, entity, post_id, msg)
+                            else:
+                                raise send_err
 
                     elif send_type == "comments":
                         # Support: https://t.me/channel/123, @channel:123, or @channel (latest post)
@@ -311,12 +328,35 @@ async def _do_send_task(task_id: int):
                                     await asyncio.sleep(2)
                                 except Exception:
                                     pass
-                                await client.send_message(entity, msg)
+                                try:
+                                    await client.send_message(entity, msg)
+                                except Exception as send_err:
+                                    err_str = str(send_err)
+                                    if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                        post_id = 1
+                                        async for m in client.iter_messages(entity, limit=1):
+                                            post_id = m.id
+                                            break
+                                        await telegram_engine.post_comment(client, entity, post_id, msg)
+                                    else:
+                                        raise send_err
 
                     success_count += 1
                     sent_this_account += 1
                     await log_event("info", "sender",
                                     f"[{account['phone']}] → {target}: ✓")
+
+                    # Live update to DB for real-time frontend monitoring
+                    try:
+                        db_up = await get_db()
+                        await db_up.execute("UPDATE send_tasks SET total_sent = total_sent + 1 WHERE id = ?", (task_id,))
+                        from datetime import datetime
+                        today_str = datetime.now().strftime("%Y-%m-%d")
+                        await db_up.execute("UPDATE daily_stats SET sent_total = sent_total + 1 WHERE date = ?", (today_str,))
+                        await db_up.commit()
+                        await db_up.close()
+                    except Exception:
+                        pass
 
                     delay = random.randint(delay_min, delay_max)
                     await asyncio.sleep(delay)
@@ -335,11 +375,25 @@ async def _do_send_task(task_id: int):
 
                 except UserPrivacyRestrictedError:
                     error_count += 1
+                    try:
+                        db_up = await get_db()
+                        await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
+                        await db_up.commit()
+                        await db_up.close()
+                    except Exception:
+                        pass
                     await log_event("warn", "sender",
                                     f"[{account['phone']}] → {target}: privacy restricted, skipping")
 
                 except Exception as e:
                     error_count += 1
+                    try:
+                        db_up = await get_db()
+                        await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
+                        await db_up.commit()
+                        await db_up.close()
+                    except Exception:
+                        pass
                     await log_event("warn", "sender",
                                     f"[{account['phone']}] → {target}: {str(e)[:120]}")
                     await asyncio.sleep(3)
@@ -414,15 +468,52 @@ async def list_tasks():
     await db.close()
     tasks = []
     for r in rows:
+        msg = r["message_text"] if "message_text" in r.keys() else str(r[4] or "")
         tasks.append({
-            "id": r[0], "send_type": r[1], "repeat_interval": r[2],
-            "targets_file": r[3], "message_text": r[4][:80] + "..." if len(r[4] or "") > 80 else r[4],
-            "spintax_enabled": bool(r[5]), "messages_per_account": r[6],
-            "delay_min": r[7], "delay_max": r[8],
-            "status": r[11], "total_sent": r[12], "total_failed": r[13],
-            "created_at": r[14]
+            "id": r["id"],
+            "send_type": r["send_type"] if "send_type" in r.keys() else "users",
+            "repeat_interval": r["repeat_interval"] if "repeat_interval" in r.keys() else 0,
+            "targets_file": r["targets_file"] if "targets_file" in r.keys() else "",
+            "message_text": msg[:80] + "..." if len(msg) > 80 else msg,
+            "spintax_enabled": bool(r["spintax_enabled"] if "spintax_enabled" in r.keys() else True),
+            "messages_per_account": r["messages_per_account"] if "messages_per_account" in r.keys() else 35,
+            "delay_min": r["delay_min"] if "delay_min" in r.keys() else 45,
+            "delay_max": r["delay_max"] if "delay_max" in r.keys() else 120,
+            "status": r["status"] if "status" in r.keys() else "pending",
+            "total_sent": r["total_sent"] if "total_sent" in r.keys() else 0,
+            "total_failed": r["total_failed"] if "total_failed" in r.keys() else 0,
+            "created_at": str(r["created_at"] if "created_at" in r.keys() else "")
         })
     return {"tasks": tasks}
+
+
+@router.get("/active-task")
+async def get_active_task():
+    db = await get_db()
+    cursor = await db.execute("SELECT * FROM send_tasks WHERE status = 'running' ORDER BY id DESC LIMIT 1")
+    row = await cursor.fetchone()
+    await db.close()
+    if not row:
+        return {"active": False, "task": None}
+    msg = row["message_text"] if "message_text" in row.keys() else ""
+    return {
+        "active": True,
+        "task": {
+            "id": row["id"],
+            "send_type": row["send_type"] if "send_type" in row.keys() else "users",
+            "repeat_interval": row["repeat_interval"] if "repeat_interval" in row.keys() else 0,
+            "targets_file": row["targets_file"] if "targets_file" in row.keys() else "",
+            "message_text": msg,
+            "spintax_enabled": bool(row["spintax_enabled"] if "spintax_enabled" in row.keys() else True),
+            "messages_per_account": row["messages_per_account"] if "messages_per_account" in row.keys() else 35,
+            "delay_min": row["delay_min"] if "delay_min" in row.keys() else 45,
+            "delay_max": row["delay_max"] if "delay_max" in row.keys() else 120,
+            "status": row["status"] if "status" in row.keys() else "running",
+            "total_sent": row["total_sent"] if "total_sent" in row.keys() else 0,
+            "total_failed": row["total_failed"] if "total_failed" in row.keys() else 0,
+            "created_at": str(row["created_at"] if "created_at" in row.keys() else "")
+        }
+    }
 
 
 @router.delete("/{task_id}")

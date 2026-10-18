@@ -38,6 +38,36 @@ export default function Sender() {
     }
   }, [message, targetsText, sendType, limit, delayMin, delayMax, repeatInterval, autoResponder, keywords, forwardTo])
 
+  // Poll active task status so tab switching or page reload does not reset status
+  useEffect(() => {
+    let isMounted = true
+    const checkActiveTask = async () => {
+      try {
+        const res = await fetch(`${API}/api/sender/active-task`)
+        if (res.ok) {
+          const data = await res.json()
+          if (!isMounted) return
+          if (data.active && data.task) {
+            setSending(true)
+            setTaskId(data.task.id)
+            setSentCount(data.task.total_sent || 0)
+            setErrorCount(data.task.total_failed || 0)
+          } else {
+            setSending(false)
+          }
+        }
+      } catch (e) {
+        // network or server sleep
+      }
+    }
+    checkActiveTask()
+    const timer = setInterval(checkActiveTask, 2500)
+    return () => {
+      isMounted = false
+      clearInterval(timer)
+    }
+  }, [])
+
   const generatePreview = () => {
     if (!message.trim()) return
     const result = message.replace(/\{([^{}]*)\}/g, (_, opts) => {
@@ -122,8 +152,18 @@ export default function Sender() {
 
   const handleStop = async () => {
     setSending(false)
-    if (taskId) {
-      try { await fetch(`${API}/api/sender/${taskId}/stop`, { method: 'POST' }) } catch {}
+    let idToStop = taskId
+    if (!idToStop) {
+      try {
+        const res = await fetch(`${API}/api/sender/active-task`)
+        if (res.ok) {
+          const d = await res.json()
+          if (d.active && d.task?.id) idToStop = d.task.id
+        }
+      } catch {}
+    }
+    if (idToStop) {
+      try { await fetch(`${API}/api/sender/${idToStop}/stop`, { method: 'POST' }) } catch {}
     }
   }
 

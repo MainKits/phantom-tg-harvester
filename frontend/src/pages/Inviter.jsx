@@ -75,34 +75,48 @@ export default function Inviter() {
 
   const handleStop = async () => {
     setInviting(false)
-    if (taskId) {
-      try { await fetch(`${API}/api/inviter/${taskId}/stop`, { method: 'POST' }) } catch {}
+    let idToStop = taskId
+    if (!idToStop) {
+      try {
+        const res = await fetch(`${API}/api/inviter/active-task`)
+        if (res.ok) {
+          const d = await res.json()
+          if (d.active && d.task?.id) idToStop = d.task.id
+        }
+      } catch {}
+    }
+    if (idToStop) {
+      try { await fetch(`${API}/api/inviter/${idToStop}/stop`, { method: 'POST' }) } catch {}
     }
   }
 
-  // Poll for status
+  // Poll for active task so switching tabs preserves running status
   useEffect(() => {
-    let interval;
-    if (inviting && taskId) {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch(`${API}/api/inviter/tasks`)
-          if (res.ok) {
-            const data = await res.json()
-            const task = data.tasks.find(t => t.id === taskId)
-            if (task) {
-              setInvitedCount(task.total_invited || 0)
-              setErrorCount(task.total_failed || 0)
-              if (task.status === 'done' || task.status === 'stopped') {
-                setInviting(false)
-              }
-            }
+    let isMounted = true
+    const checkActiveInvite = async () => {
+      try {
+        const res = await fetch(`${API}/api/inviter/active-task`)
+        if (res.ok) {
+          const data = await res.json()
+          if (!isMounted) return
+          if (data.active && data.task) {
+            setInviting(true)
+            setTaskId(data.task.id)
+            setInvitedCount(data.task.total_invited || 0)
+            setErrorCount(data.task.total_failed || 0)
+          } else {
+            setInviting(false)
           }
-        } catch {}
-      }, 3000)
+        }
+      } catch {}
     }
-    return () => clearInterval(interval)
-  }, [inviting, taskId])
+    checkActiveInvite()
+    const interval = setInterval(checkActiveInvite, 2500)
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [])
 
   return (
     <>
