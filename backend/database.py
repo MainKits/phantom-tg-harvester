@@ -50,14 +50,18 @@ def get_supabase_client():
 
 async def get_db():
     """Get local database connection."""
-    db = await aiosqlite.connect(DB_PATH, timeout=30.0)
+    db = await aiosqlite.connect(DB_PATH, timeout=60.0)
     db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA busy_timeout = 60000;")
     return db
 
 
 async def init_db():
     """Initialize database tables and sync cloud state."""
-    db = await aiosqlite.connect(DB_PATH, timeout=30.0)
+    db = await aiosqlite.connect(DB_PATH, timeout=60.0)
+    await db.execute("PRAGMA journal_mode = WAL;")
+    await db.execute("PRAGMA busy_timeout = 60000;")
+    await db.execute("PRAGMA synchronous = NORMAL;")
     
     await db.executescript("""
         CREATE TABLE IF NOT EXISTS accounts (
@@ -344,7 +348,8 @@ def backup_session_to_supabase(phone: str, session_file_name: str):
 async def log_event(level: str, source: str, message: str, details: str = None):
     """Log an event to the local database and cloud Supabase."""
     try:
-        db = await aiosqlite.connect(DB_PATH, timeout=30.0)
+        db = await aiosqlite.connect(DB_PATH, timeout=60.0)
+        await db.execute("PRAGMA busy_timeout = 60000;")
         await db.execute(
             "INSERT INTO event_logs (level, source, message, details) VALUES (?, ?, ?, ?)",
             (level, source, message, details)

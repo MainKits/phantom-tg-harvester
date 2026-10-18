@@ -232,7 +232,14 @@ async def _do_send_task(task_id: int):
                         clean_u = int(clean_u)
                     entity = await client.get_entity(clean_u)
                     if media_path and os.path.exists(media_path):
-                        await client.send_message(entity, msg, file=media_path)
+                        try:
+                            await client.send_message(entity, msg, file=media_path)
+                        except Exception as m_err:
+                            m_str = str(m_err).lower()
+                            if "media" in m_str or "photo" in m_str or "file" in m_str:
+                                await client.send_message(entity, msg)
+                            else:
+                                raise m_err
                     else:
                         await client.send_message(entity, msg)
 
@@ -263,7 +270,14 @@ async def _do_send_task(task_id: int):
 
                     try:
                         if media_path and os.path.exists(media_path):
-                            await client.send_message(entity, msg, file=media_path)
+                            try:
+                                await client.send_message(entity, msg, file=media_path)
+                            except Exception as m_err:
+                                m_str = str(m_err).lower()
+                                if "media" in m_str or "photo" in m_str or "file" in m_str:
+                                    await client.send_message(entity, msg)
+                                else:
+                                    raise m_err
                         else:
                             await client.send_message(entity, msg)
                     except Exception as send_err:
@@ -327,7 +341,14 @@ async def _do_send_task(task_id: int):
                                 pass
                             try:
                                 if media_path and os.path.exists(media_path):
-                                    await client.send_message(entity, msg, file=media_path)
+                                    try:
+                                        await client.send_message(entity, msg, file=media_path)
+                                    except Exception as m_err:
+                                        m_str = str(m_err).lower()
+                                        if "media" in m_str or "photo" in m_str or "file" in m_str:
+                                            await client.send_message(entity, msg)
+                                        else:
+                                            raise m_err
                                 else:
                                     await client.send_message(entity, msg)
                             except Exception as send_err:
