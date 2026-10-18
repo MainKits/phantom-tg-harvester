@@ -25,9 +25,10 @@ _active_task_loops: dict = {}
 
 @router.post("/create-task")
 async def create_send_task(
-    message_text: str = Form(...),
+    message_text: str = Form(""),
     targets_file: str = Form(""),
     targets_text: Optional[str] = Form(None),
+    media_file: Optional[UploadFile] = File(None),
     send_type: str = Form("users"),        # "users" | "chats" | "comments"
     repeat_interval: int = Form(0),
     spintax_enabled: bool = Form(True),
@@ -39,10 +40,20 @@ async def create_send_task(
     forward_to_account: Optional[str] = Form(None),
     comment_post_id: int = Form(0),        # for comments mode: post id to comment on
 ):
-    if spintax_enabled:
+    if spintax_enabled and message_text:
         v = validate_spintax(message_text)
         if not v["valid"]:
             raise HTTPException(400, detail=f"Spintax error: {v['error']}")
+
+    media_path = None
+    if media_file and media_file.filename:
+        import time
+        ext = os.path.splitext(media_file.filename)[1]
+        safe_name = f"media_{int(time.time())}_{random.randint(1000, 9999)}{ext}"
+        dest = os.path.join(MEDIA_DIR, safe_name)
+        with open(dest, "wb") as f:
+            f.write(await media_file.read())
+        media_path = dest
 
     if targets_text and targets_text.strip():
         import time
@@ -63,11 +74,11 @@ async def create_send_task(
 
     cursor = await db.execute(
         """INSERT INTO send_tasks
-        (send_type, repeat_interval, targets_file, message_text, spintax_enabled,
+        (send_type, repeat_interval, targets_file, message_text, media_path, spintax_enabled,
          messages_per_account, delay_min, delay_max, auto_responder_enabled,
          auto_responder_keywords, forward_to_account)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (send_type, repeat_interval, targets_file, message_text, int(spintax_enabled),
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (send_type, repeat_interval, targets_file, message_text, media_path, int(spintax_enabled),
          messages_per_account, delay_min, delay_max, int(auto_responder_enabled),
          auto_responder_keywords, forward_to_account),
     )
@@ -75,9 +86,9 @@ async def create_send_task(
     await db.commit()
     await db.close()
 
-    variations = count_variations(message_text) if spintax_enabled else 1
+    variations = count_variations(message_text) if (spintax_enabled and message_text) else 1
     await log_event("info", "sender",
-                    f"Send task #{task_id} created ({variations} variations, type: {send_type})")
+                    f"Send task #{task_id} created ({variations} variations, type: {send_type}, media: {bool(media_path)})")
     return {
         "success": True, "task_id": task_id, "variations": variations,
         "preview": parse_spintax(message_text) if spintax_enabled else message_text
@@ -143,7 +154,7 @@ async def _mark_spam_block(account_id: int):
 
 
 async def _do_send_task(task_id: int):
-    """Background worker: sends messages rotating between all active accounts."""
+    """Background worker: sends messages in parallel across multiple accounts with target partitioning."""
     from ..services.telegram_engine import telegram_engine
     from telethon.tl.functions.channels import JoinChannelRequest
     from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerFloodError
@@ -161,6 +172,9 @@ async def _do_send_task(task_id: int):
         repeat_interval  = int((task["repeat_interval"] if "repeat_interval" in task.keys() else 0) or 0)
         targets_file     = str((task["targets_file"] if "targets_file" in task.keys() else "") or "")
         message_text     = str(task["message_text"] if "message_text" in task.keys() else "")
+        media_path       = str(task["media_path"] if "media_path" in task.keys() else "") or None
+        if media_path and not os.path.exists(media_path):
+            media_path = None
         spintax_enabled  = bool(task["spintax_enabled"] if "spintax_enabled" in task.keys() else True)
         per_account      = int((task["messages_per_account"] if "messages_per_account" in task.keys() else 35) or 35)
         delay_min        = int((task["delay_min"] if "delay_min" in task.keys() else 45) or 45)
@@ -185,7 +199,196 @@ async def _do_send_task(task_id: int):
         await db.close()
         return
 
-    await log_event("info", "sender", f"Task #{task_id}: {len(targets)} targets, type={send_type}")
+    await log_event("info", "sender", f"Task #{task_id}: {len(targets)} targets, type={send_type}, media={'yes' if media_path else 'no'}")
+
+    async def _send_for_account(account: dict, my_targets: list):
+        """Worker function for one account sending to its distributed targets concurrently."""
+        try:
+            await telegram_engine.connect_account(account)
+            client = telegram_engine.get_client(account["id"])
+        except Exception as e:
+            await log_event("warn", "sender", f"Task #{task_id}: failed to connect {account['phone']}: {e}")
+            return
+
+        if not client:
+            return
+
+        sent_this_account = 0
+        for target in my_targets:
+            if task_id not in _active_task_loops:
+                break
+            if sent_this_account >= per_account:
+                break
+
+            try:
+                msg = parse_spintax(message_text) if (spintax_enabled and message_text) else message_text
+
+                if send_type == "users":
+                    clean_u = str(target).strip()
+                    if "t.me/" in clean_u:
+                        clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
+                    clean_u = clean_u.lstrip("@")
+                    if clean_u.isdigit():
+                        clean_u = int(clean_u)
+                    entity = await client.get_entity(clean_u)
+                    if media_path and os.path.exists(media_path):
+                        await client.send_message(entity, msg, file=media_path)
+                    else:
+                        await client.send_message(entity, msg)
+
+                elif send_type == "chats":
+                    clean_c = str(target).strip()
+                    if "t.me/+" in clean_c or "joinchat/" in clean_c:
+                        invite_hash = clean_c.split("t.me/+")[1] if "t.me/+" in clean_c else clean_c.split("joinchat/")[1]
+                        invite_hash = invite_hash.split("/")[0].split("?")[0]
+                        from telethon.tl.functions.messages import ImportChatInviteRequest
+                        try:
+                            await client(ImportChatInviteRequest(invite_hash))
+                            await asyncio.sleep(2)
+                        except Exception:
+                            pass
+                        entity = await client.get_entity(clean_c)
+                    else:
+                        if "t.me/" in clean_c:
+                            clean_c = clean_c.split("t.me/")[-1].split("/")[0].split("?")[0]
+                        clean_c = clean_c.lstrip("@")
+                        if clean_c.isdigit():
+                            clean_c = int(clean_c)
+                        entity = await client.get_entity(clean_c)
+                        try:
+                            await client(JoinChannelRequest(entity))
+                            await asyncio.sleep(2)
+                        except Exception:
+                            pass
+
+                    try:
+                        if media_path and os.path.exists(media_path):
+                            await client.send_message(entity, msg, file=media_path)
+                        else:
+                            await client.send_message(entity, msg)
+                    except Exception as send_err:
+                        err_str = str(send_err)
+                        if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                            post_id = 1
+                            async for m in client.iter_messages(entity, limit=1):
+                                post_id = m.id
+                                break
+                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                        else:
+                            raise send_err
+
+                elif send_type == "comments":
+                    clean_t = target.strip()
+                    if "t.me/" in clean_t:
+                        path_parts = clean_t.split("t.me/")[1].split("/")
+                        channel = path_parts[0]
+                        post_id = int(path_parts[1]) if len(path_parts) > 1 and path_parts[1].isdigit() else 1
+                    elif ":" in clean_t:
+                        parts = clean_t.rsplit(":", 1)
+                        channel = parts[0]
+                        post_id = int(parts[1]) if parts[1].isdigit() else 1
+                    else:
+                        channel = clean_t
+                        entity = await client.get_entity(channel)
+                        post_id = 1
+                        async for m in client.iter_messages(entity, limit=1):
+                            post_id = m.id
+                            break
+                    await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
+
+                elif send_type == "combo":
+                    clean_t = target.strip()
+                    is_post_link = (("t.me/" in clean_t and "/" in clean_t.split("t.me/")[1] and clean_t.split("t.me/")[1].split("/")[1].isdigit()) or (":" in clean_t and clean_t.rsplit(":", 1)[1].isdigit()))
+                    
+                    if is_post_link:
+                        if "t.me/" in clean_t:
+                            path_parts = clean_t.split("t.me/")[1].split("/")
+                            channel = path_parts[0]
+                            post_id = int(path_parts[1])
+                        else:
+                            parts = clean_t.rsplit(":", 1)
+                            channel = parts[0]
+                            post_id = int(parts[1])
+                        await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
+                    else:
+                        from telethon.tl.types import Channel
+                        entity = await client.get_entity(clean_t)
+                        if isinstance(entity, Channel) and entity.broadcast:
+                            post_id = 1
+                            async for m in client.iter_messages(entity, limit=1):
+                                post_id = m.id
+                                break
+                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                        else:
+                            try:
+                                await client(JoinChannelRequest(entity))
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
+                            try:
+                                if media_path and os.path.exists(media_path):
+                                    await client.send_message(entity, msg, file=media_path)
+                                else:
+                                    await client.send_message(entity, msg)
+                            except Exception as send_err:
+                                err_str = str(send_err)
+                                if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                    post_id = 1
+                                    async for m in client.iter_messages(entity, limit=1):
+                                        post_id = m.id
+                                        break
+                                    await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                                else:
+                                    raise send_err
+
+                sent_this_account += 1
+                await log_event("info", "sender", f"[{account['phone']}] → {target}: ✓")
+
+                # Live update to DB for real-time frontend monitoring
+                try:
+                    db_up = await get_db()
+                    await db_up.execute("UPDATE send_tasks SET total_sent = total_sent + 1 WHERE id = ?", (task_id,))
+                    from datetime import datetime
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    await db_up.execute("UPDATE daily_stats SET sent_total = sent_total + 1 WHERE date = ?", (today_str,))
+                    await db_up.commit()
+                    await db_up.close()
+                except Exception:
+                    pass
+
+                delay = random.randint(delay_min, delay_max)
+                await asyncio.sleep(delay)
+
+            except FloodWaitError as e:
+                await log_event("warn", "sender", f"[{account['phone']}] FloodWait {e.seconds}s — marking spam-block")
+                await _mark_spam_block(account["id"])
+                break
+
+            except PeerFloodError:
+                await log_event("warn", "sender", f"[{account['phone']}] PeerFlood — marking spam-block")
+                await _mark_spam_block(account["id"])
+                break
+
+            except UserPrivacyRestrictedError:
+                try:
+                    db_up = await get_db()
+                    await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
+                    await db_up.commit()
+                    await db_up.close()
+                except Exception:
+                    pass
+                await log_event("warn", "sender", f"[{account['phone']}] → {target}: privacy restricted, skipping")
+
+            except Exception as e:
+                try:
+                    db_up = await get_db()
+                    await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
+                    await db_up.commit()
+                    await db_up.close()
+                except Exception:
+                    pass
+                await log_event("warn", "sender", f"[{account['phone']}] → {target}: {str(e)[:120]}")
+                await asyncio.sleep(3)
 
     while task_id in _active_task_loops:
         db = await get_db()
@@ -196,223 +399,21 @@ async def _do_send_task(task_id: int):
             await log_event("warn", "sender", f"Task #{task_id}: no active accounts available")
             break
 
-        success_count = 0
-        error_count = 0
-        target_index = 0
+        # Distribute targets across active accounts and run concurrently in parallel threads/workers
+        workers = []
+        for i, account in enumerate(accounts):
+            acc_targets = [t for idx, t in enumerate(targets) if idx % len(accounts) == i]
+            if acc_targets:
+                workers.append(_send_for_account(account, acc_targets))
 
-        for account in accounts:
-            if task_id not in _active_task_loops:
-                break
-            if target_index >= len(targets):
-                break
+        if workers:
+            await asyncio.gather(*workers)
 
-            # Connect account
-            try:
-                await telegram_engine.connect_account(account)
-                client = telegram_engine.get_client(account["id"])
-            except Exception as e:
-                await log_event("warn", "sender",
-                                f"Task #{task_id}: failed to connect {account['phone']}: {e}")
-                continue
-
-            if not client:
-                continue
-
-            # This account will send 'per_account' messages
-            sent_this_account = 0
-            while sent_this_account < per_account and target_index < len(targets):
-                if task_id not in _active_task_loops:
-                    break
-
-                target = targets[target_index]
-                target_index += 1
-
-                try:
-                    msg = parse_spintax(message_text) if spintax_enabled else message_text
-
-                    if send_type == "users":
-                        clean_u = str(target).strip()
-                        if "t.me/" in clean_u:
-                            clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
-                        clean_u = clean_u.lstrip("@")
-                        if clean_u.isdigit():
-                            clean_u = int(clean_u)
-                        entity = await client.get_entity(clean_u)
-                        await client.send_message(entity, msg)
-
-                    elif send_type == "chats":
-                        clean_c = str(target).strip()
-                        if "t.me/+" in clean_c or "joinchat/" in clean_c:
-                            invite_hash = clean_c.split("t.me/+")[1] if "t.me/+" in clean_c else clean_c.split("joinchat/")[1]
-                            invite_hash = invite_hash.split("/")[0].split("?")[0]
-                            from telethon.tl.functions.messages import ImportChatInviteRequest
-                            try:
-                                await client(ImportChatInviteRequest(invite_hash))
-                                await asyncio.sleep(2)
-                            except Exception:
-                                pass
-                            entity = await client.get_entity(clean_c)
-                        else:
-                            if "t.me/" in clean_c:
-                                clean_c = clean_c.split("t.me/")[-1].split("/")[0].split("?")[0]
-                            clean_c = clean_c.lstrip("@")
-                            if clean_c.isdigit():
-                                clean_c = int(clean_c)
-                            entity = await client.get_entity(clean_c)
-                            try:
-                                await client(JoinChannelRequest(entity))
-                                await asyncio.sleep(2)
-                            except Exception:
-                                pass
-                        try:
-                            await client.send_message(entity, msg)
-                        except Exception as send_err:
-                            err_str = str(send_err)
-                            if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                                # Channel does not allow direct posts, comment on latest post
-                                post_id = 1
-                                async for m in client.iter_messages(entity, limit=1):
-                                    post_id = m.id
-                                    break
-                                await telegram_engine.post_comment(client, entity, post_id, msg)
-                            else:
-                                raise send_err
-
-                    elif send_type == "comments":
-                        # Support: https://t.me/channel/123, @channel:123, or @channel (latest post)
-                        clean_t = target.strip()
-                        if "t.me/" in clean_t:
-                            path_parts = clean_t.split("t.me/")[1].split("/")
-                            channel = path_parts[0]
-                            post_id = int(path_parts[1]) if len(path_parts) > 1 and path_parts[1].isdigit() else 1
-                        elif ":" in clean_t:
-                            parts = clean_t.rsplit(":", 1)
-                            channel = parts[0]
-                            post_id = int(parts[1]) if parts[1].isdigit() else 1
-                        else:
-                            channel = clean_t
-                            entity = await client.get_entity(channel)
-                            post_id = 1
-                            async for m in client.iter_messages(entity, limit=1):
-                                post_id = m.id
-                                break
-                        await telegram_engine.post_comment(client, channel, post_id, msg)
-
-                    elif send_type == "combo":
-                        # Combo mode: automatically detects whether target is a channel (comments) or a group (chat message)
-                        clean_t = target.strip()
-                        is_post_link = (("t.me/" in clean_t and "/" in clean_t.split("t.me/")[1] and clean_t.split("t.me/")[1].split("/")[1].isdigit()) or (":" in clean_t and clean_t.rsplit(":", 1)[1].isdigit()))
-                        
-                        if is_post_link:
-                            if "t.me/" in clean_t:
-                                path_parts = clean_t.split("t.me/")[1].split("/")
-                                channel = path_parts[0]
-                                post_id = int(path_parts[1])
-                            else:
-                                parts = clean_t.rsplit(":", 1)
-                                channel = parts[0]
-                                post_id = int(parts[1])
-                            await telegram_engine.post_comment(client, channel, post_id, msg)
-                        else:
-                            from telethon.tl.types import Channel
-                            entity = await client.get_entity(clean_t)
-                            if isinstance(entity, Channel) and entity.broadcast:
-                                post_id = 1
-                                async for m in client.iter_messages(entity, limit=1):
-                                    post_id = m.id
-                                    break
-                                await telegram_engine.post_comment(client, entity, post_id, msg)
-                            else:
-                                try:
-                                    await client(JoinChannelRequest(entity))
-                                    await asyncio.sleep(2)
-                                except Exception:
-                                    pass
-                                try:
-                                    await client.send_message(entity, msg)
-                                except Exception as send_err:
-                                    err_str = str(send_err)
-                                    if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                                        post_id = 1
-                                        async for m in client.iter_messages(entity, limit=1):
-                                            post_id = m.id
-                                            break
-                                        await telegram_engine.post_comment(client, entity, post_id, msg)
-                                    else:
-                                        raise send_err
-
-                    success_count += 1
-                    sent_this_account += 1
-                    await log_event("info", "sender",
-                                    f"[{account['phone']}] → {target}: ✓")
-
-                    # Live update to DB for real-time frontend monitoring
-                    try:
-                        db_up = await get_db()
-                        await db_up.execute("UPDATE send_tasks SET total_sent = total_sent + 1 WHERE id = ?", (task_id,))
-                        from datetime import datetime
-                        today_str = datetime.now().strftime("%Y-%m-%d")
-                        await db_up.execute("UPDATE daily_stats SET sent_total = sent_total + 1 WHERE date = ?", (today_str,))
-                        await db_up.commit()
-                        await db_up.close()
-                    except Exception:
-                        pass
-
-                    delay = random.randint(delay_min, delay_max)
-                    await asyncio.sleep(delay)
-
-                except FloodWaitError as e:
-                    await log_event("warn", "sender",
-                                    f"[{account['phone']}] FloodWait {e.seconds}s — marking spam-block")
-                    await _mark_spam_block(account["id"])
-                    break  # move to next account
-
-                except PeerFloodError:
-                    await log_event("warn", "sender",
-                                    f"[{account['phone']}] PeerFlood — marking spam-block")
-                    await _mark_spam_block(account["id"])
-                    break
-
-                except UserPrivacyRestrictedError:
-                    error_count += 1
-                    try:
-                        db_up = await get_db()
-                        await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
-                        await db_up.commit()
-                        await db_up.close()
-                    except Exception:
-                        pass
-                    await log_event("warn", "sender",
-                                    f"[{account['phone']}] → {target}: privacy restricted, skipping")
-
-                except Exception as e:
-                    error_count += 1
-                    try:
-                        db_up = await get_db()
-                        await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
-                        await db_up.commit()
-                        await db_up.close()
-                    except Exception:
-                        pass
-                    await log_event("warn", "sender",
-                                    f"[{account['phone']}] → {target}: {str(e)[:120]}")
-                    await asyncio.sleep(3)
-
-        # Update stats
-        db = await get_db()
-        await db.execute(
-            "UPDATE send_tasks SET total_sent = total_sent + ?, total_failed = total_failed + ? WHERE id = ?",
-            (success_count, error_count, task_id)
-        )
-        await db.commit()
-        await db.close()
-
-        # If all targets done or one-time mode
-        if target_index >= len(targets) or send_type == "users" or repeat_interval <= 0:
+        # If one-time mode or users send type
+        if send_type == "users" or repeat_interval <= 0:
             break
 
-        await log_event("info", "sender",
-                        f"Task #{task_id} sleeping {repeat_interval} min before next iteration")
+        await log_event("info", "sender", f"Task #{task_id} sleeping {repeat_interval} min before next iteration")
         for _ in range(repeat_interval * 60 // 5):
             if task_id not in _active_task_loops:
                 break
@@ -480,6 +481,7 @@ async def list_tasks():
             "delay_min": r["delay_min"] if "delay_min" in r.keys() else 45,
             "delay_max": r["delay_max"] if "delay_max" in r.keys() else 120,
             "status": r["status"] if "status" in r.keys() else "pending",
+            "media_path": r["media_path"] if "media_path" in r.keys() else None,
             "total_sent": r["total_sent"] if "total_sent" in r.keys() else 0,
             "total_failed": r["total_failed"] if "total_failed" in r.keys() else 0,
             "created_at": str(r["created_at"] if "created_at" in r.keys() else "")
@@ -513,6 +515,7 @@ async def get_active_task():
             "repeat_interval": row["repeat_interval"] if "repeat_interval" in row.keys() else 0,
             "targets_file": row["targets_file"] if "targets_file" in row.keys() else "",
             "message_text": msg,
+            "media_path": row["media_path"] if "media_path" in row.keys() else None,
             "spintax_enabled": bool(row["spintax_enabled"] if "spintax_enabled" in row.keys() else True),
             "messages_per_account": row["messages_per_account"] if "messages_per_account" in row.keys() else 35,
             "delay_min": row["delay_min"] if "delay_min" in row.keys() else 45,

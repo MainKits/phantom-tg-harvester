@@ -319,10 +319,13 @@ class TelegramEngine:
             await client(JoinChannelRequest(entity))
 
     async def post_comment(self, client: TelegramClient, channel,
-                            post_id: int, comment_text: str):
+                            post_id: int, comment_text: str, file: str = None):
         """Post a comment to a channel post (via linked discussion group)."""
         entity = channel if not isinstance(channel, str) else await client.get_entity(channel)
-        await client.send_message(entity, comment_text, comment_to=post_id)
+        if file and os.path.exists(file):
+            await client.send_message(entity, comment_text, comment_to=post_id, file=file)
+        else:
+            await client.send_message(entity, comment_text, comment_to=post_id)
 
 
 # Global singleton

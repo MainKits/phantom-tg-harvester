@@ -108,7 +108,7 @@ export default function Sender() {
   }
 
   const handleStart = async () => {
-    if (!message.trim()) return alert('Введіть текст повідомлення')
+    if (!message.trim() && !mediaFile) return alert('Введіть текст повідомлення або прикріпіть фото/відео')
     const cleanTargets = targetsText.trim()
     if (!cleanTargets) {
       return alert(sendType === 'users' ? 'Введіть або завантажте базу юзерів' : 'Введіть або завантажте список чатів/каналів')
@@ -118,7 +118,7 @@ export default function Sender() {
     setErrorCount(0)
     try {
       const form = new FormData()
-      form.append('message_text', message)
+      form.append('message_text', message || '')
       form.append('targets_text', cleanTargets)
       form.append('send_type', sendType)
       form.append('repeat_interval', repeatInterval)
@@ -129,6 +129,9 @@ export default function Sender() {
       form.append('auto_responder_enabled', autoResponder)
       form.append('auto_responder_keywords', JSON.stringify((keywords || '').split(',').map(k => k.trim())))
       form.append('forward_to_account', forwardTo || '')
+      if (mediaFile) {
+        form.append('media_file', mediaFile)
+      }
       
       const res = await fetch(`${API}/api/sender/create-task`, { method: 'POST', body: form })
       if (res.ok) {
