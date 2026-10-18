@@ -11,8 +11,17 @@ from .routers import dashboard, accounts, parser, sender, inviter, chat_finder, 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database on startup."""
+    """Initialize database on startup and reset stale running tasks."""
     await init_db()
+    try:
+        from .database import get_db
+        db = await get_db()
+        await db.execute("UPDATE send_tasks SET status = 'stopped' WHERE status = 'running'")
+        await db.execute("UPDATE invite_tasks SET status = 'stopped' WHERE status = 'running'")
+        await db.commit()
+        await db.close()
+    except Exception:
+        pass
     yield
 
 app = FastAPI(

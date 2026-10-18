@@ -288,9 +288,18 @@ async def get_active_invite_task():
     db = await get_db()
     cursor = await db.execute("SELECT * FROM invite_tasks WHERE status = 'running' ORDER BY id DESC LIMIT 1")
     row = await cursor.fetchone()
-    await db.close()
     if not row:
+        await db.close()
         return {"active": False, "task": None}
+    
+    task_id = row["id"] if "id" in row.keys() else row[0]
+    if task_id not in _active_invite_task_loops:
+        await db.execute("UPDATE invite_tasks SET status = 'stopped' WHERE id = ?", (task_id,))
+        await db.commit()
+        await db.close()
+        return {"active": False, "task": None}
+
+    await db.close()
     return {
         "active": True,
         "task": {

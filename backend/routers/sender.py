@@ -492,9 +492,18 @@ async def get_active_task():
     db = await get_db()
     cursor = await db.execute("SELECT * FROM send_tasks WHERE status = 'running' ORDER BY id DESC LIMIT 1")
     row = await cursor.fetchone()
-    await db.close()
     if not row:
+        await db.close()
         return {"active": False, "task": None}
+    
+    # Check if really running in memory
+    if row["id"] not in _active_task_loops:
+        await db.execute("UPDATE send_tasks SET status = 'stopped' WHERE id = ?", (row["id"],))
+        await db.commit()
+        await db.close()
+        return {"active": False, "task": None}
+
+    await db.close()
     msg = row["message_text"] if "message_text" in row.keys() else ""
     return {
         "active": True,
