@@ -178,6 +178,33 @@ async def _mark_banned(account_id: int, reason: str = "Акаунт заблок
         pass
 
 
+async def _check_is_real_spamblock(client, account: dict) -> bool:
+    """Verify with official @SpamBot if account actually has an active spam-block."""
+    try:
+        await client.send_message("spambot", "/start")
+        reply_text = ""
+        for _ in range(5):
+            await asyncio.sleep(1.5)
+            messages = await client.get_messages("spambot", limit=1)
+            if messages and not messages[0].out:
+                reply_text = messages[0].message.lower()
+                break
+
+        if reply_text:
+            good_words = [
+                "no limits", "free from any restrictions", "good news",
+                "свободен", "вільний", "ограничений нет", "обмежень немає",
+                "not limited", "working well", "free as a bird"
+            ]
+            if any(w in reply_text for w in good_words):
+                return False
+            if any(w in reply_text for w in ["limited", "annoying", "moderators", "ограничен", "обмежен"]):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 async def _do_send_task(task_id: int):
     """Background worker: sends messages in parallel across multiple accounts with target partitioning."""
     from ..services.telegram_engine import telegram_engine
@@ -476,42 +503,57 @@ async def _do_send_task(task_id: int):
                 await asyncio.sleep(delay)
 
             except FloodWaitError as e:
-                await log_event("warn", "sender", f"[{account['phone']}] FloodWait {e.seconds}s — marking spam-block")
-                await _mark_spam_block(account["id"])
-                break
+                # FloodWait is a temporary cooldown on a specific action (e.g. joining channels), NOT an account-wide spam-block!
+                if e.seconds <= 60:
+                    await log_event("info", "sender", f"[{account['phone']}] FloodWait {e.seconds}s — очікуємо...")
+                    await asyncio.sleep(e.seconds + 2)
+                    continue
+                else:
+                    await log_event("warn", "sender", f"[{account['phone']}] FloodWait {e.seconds}s (тимчасовий ліміт дії). Акаунт НЕ в спам-блоці. Пропускаємо цей акаунт для поточної задачі.")
+                    break
 
             except PeerFloodError:
-                await log_event("warn", "sender", f"[{account['phone']}] PeerFlood — marking spam-block")
-                await _mark_spam_block(account["id"])
+                # PeerFlood: check with official @SpamBot before claiming spam-block!
+                is_real = await _check_is_real_spamblock(client, account)
+                if is_real:
+                    await log_event("warn", "sender", f"[{account['phone']}] PeerFlood — підтверджено спам-блок через @SpamBot")
+                    await _mark_spam_block(account["id"], "Підтверджено @SpamBot")
+                else:
+                    await log_event("warn", "sender", f"[{account['phone']}] PeerFlood (тимчасовий ліміт дій) — в @SpamBot чисто. Зупиняємо акаунт на поточну задачу, статус залишається Active.")
                 break
 
             except (UserDeactivatedBanError, PhoneNumberBannedError) as e:
-                await log_event("error", "sender", f"[{account['phone']}] Banned/Deactivated: {e}")
+                await log_event("error", "sender", f"[{account['phone']}] Акаунт заблоковано Telegram: {e}")
                 await _mark_banned(account["id"], account["phone"], str(e))
                 break
 
             except UserPrivacyRestrictedError:
                 await _increment_stats(task_id, success=False)
-                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: privacy restricted, skipping")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: приватні налаштування користувача, пропуск")
 
             except TimeoutError:
                 await _increment_stats(task_id, success=False)
-                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: timeout (>40s), skipping")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: таймаут (>40s), пропуск")
 
             except Exception as e:
                 err_text = str(e).lower()
-                if "banned" in err_text or "deactivated" in err_text:
-                    await log_event("error", "sender", f"[{account['phone']}] Banned: {e}")
+                # Check for real account-level ban
+                if "user_deactivated" in err_text or "phone_number_banned" in err_text:
+                    await log_event("error", "sender", f"[{account['phone']}] Заблоковано: {e}")
                     await _mark_banned(account["id"], account["phone"], str(e))
                     break
-                if "spam" in err_text or "flood" in err_text or ("restricted" in err_text and "mutual" in err_text):
-                    await log_event("warn", "sender", f"[{account['phone']}] Spam block detected: {e}")
-                    await _mark_spam_block(account["id"])
-                    break
+
+                # Only if Telegram explicitly reports mutual contacts restriction on PMs
+                if send_type == "users" and "mutual contacts" in err_text:
+                    is_real = await _check_is_real_spamblock(client, account)
+                    if is_real:
+                        await log_event("warn", "sender", f"[{account['phone']}] Спам-блок підтверджено: тільки взаємні контакти")
+                        await _mark_spam_block(account["id"], "Тільки взаємні контакти")
+                        break
 
                 await _increment_stats(task_id, success=False)
                 await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: {str(e)[:120]}")
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
 
     while task_id in _active_task_loops:
         db = await get_db()

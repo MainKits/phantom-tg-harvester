@@ -211,15 +211,27 @@ async def _do_invite_task(task_id: int):
                 await log_event("warn", "inviter", f"{user_str}: account deactivated")
 
             except FloodWaitError as e:
-                await log_event("warn", "inviter",
-                                f"[{account['phone']}] FloodWait {e.seconds}s → spam-block")
-                await _mark_spam_block(account["id"])
-                break
+                # FloodWait is a temporary cooldown, NOT an account spam-block!
+                if e.seconds <= 60:
+                    await log_event("info", "inviter", f"[{account['phone']}] FloodWait {e.seconds}s — очікуємо...")
+                    await asyncio.sleep(e.seconds + 2)
+                    continue
+                else:
+                    await log_event("warn", "inviter",
+                                    f"[{account['phone']}] FloodWait {e.seconds}s (тимчасовий ліміт дії). Акаунт НЕ в спам-блоці.")
+                    break
 
             except PeerFloodError:
-                await log_event("warn", "inviter",
-                                f"[{account['phone']}] PeerFlood → spam-block")
-                await _mark_spam_block(account["id"])
+                from .sender import _check_is_real_spamblock
+                client = telegram_engine.get_client(account["id"])
+                is_real = await _check_is_real_spamblock(client, account) if client else False
+                if is_real:
+                    await log_event("warn", "inviter",
+                                    f"[{account['phone']}] PeerFlood — підтверджено спам-блок через @SpamBot")
+                    await _mark_spam_block(account["id"])
+                else:
+                    await log_event("warn", "inviter",
+                                    f"[{account['phone']}] PeerFlood (тимчасовий ліміт дій) — в @SpamBot чисто. Зупиняємо акаунт на поточну задачу, статус залишається Active.")
                 break
 
             except Exception as e:
