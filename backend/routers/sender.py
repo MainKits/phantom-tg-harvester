@@ -201,16 +201,38 @@ async def _do_send_task(task_id: int):
 
     await log_event("info", "sender", f"Task #{task_id}: {len(targets)} targets, type={send_type}, media={'yes' if media_path else 'no'}")
 
+    async def _increment_stats(task_id: int, success: bool):
+        """Update live statistics in send_tasks and daily_stats safely."""
+        db_up = None
+        try:
+            db_up = await get_db()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            await db_up.execute("INSERT OR IGNORE INTO daily_stats (date) VALUES (?)", (today_str,))
+            if success:
+                await db_up.execute("UPDATE send_tasks SET total_sent = total_sent + 1 WHERE id = ?", (task_id,))
+                await db_up.execute("UPDATE daily_stats SET messages_sent = messages_sent + 1 WHERE date = ?", (today_str,))
+            else:
+                await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
+                await db_up.execute("UPDATE daily_stats SET errors_count = errors_count + 1 WHERE date = ?", (today_str,))
+            await db_up.commit()
+        except Exception as up_err:
+            print(f"[Sender] Stats update warning: {up_err}")
+        finally:
+            if db_up:
+                await db_up.close()
+
     async def _send_for_account(account: dict, my_targets: list):
         """Worker function for one account sending to its distributed targets concurrently."""
+        connected = False
         try:
-            await telegram_engine.connect_account(account)
+            connected = await telegram_engine.connect_account(account)
             client = telegram_engine.get_client(account["id"])
         except Exception as e:
             await log_event("warn", "sender", f"Task #{task_id}: failed to connect {account['phone']}: {e}")
             return
 
-        if not client:
+        if not connected or not client:
+            await log_event("warn", "sender", f"Task #{task_id}: account {account['phone']} not authorized")
             return
 
         sent_this_account = 0
@@ -220,55 +242,23 @@ async def _do_send_task(task_id: int):
             if sent_this_account >= per_account:
                 break
 
+            target_str = str(target).strip()
+            if not target_str:
+                continue
+
             try:
-                msg = parse_spintax(message_text) if (spintax_enabled and message_text) else message_text
+                # 40s timeout so no single chat can freeze the worker
+                async with asyncio.timeout(40.0):
+                    msg = parse_spintax(message_text) if (spintax_enabled and message_text) else message_text
 
-                if send_type == "users":
-                    clean_u = str(target).strip()
-                    if "t.me/" in clean_u:
-                        clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
-                    clean_u = clean_u.lstrip("@")
-                    if clean_u.isdigit():
-                        clean_u = int(clean_u)
-                    entity = await client.get_entity(clean_u)
-                    if media_path and os.path.exists(media_path):
-                        try:
-                            await client.send_message(entity, msg, file=media_path)
-                        except Exception as m_err:
-                            m_str = str(m_err).lower()
-                            if "media" in m_str or "photo" in m_str or "file" in m_str:
-                                await client.send_message(entity, msg)
-                            else:
-                                raise m_err
-                    else:
-                        await client.send_message(entity, msg)
-
-                elif send_type == "chats":
-                    clean_c = str(target).strip()
-                    if "t.me/+" in clean_c or "joinchat/" in clean_c:
-                        invite_hash = clean_c.split("t.me/+")[1] if "t.me/+" in clean_c else clean_c.split("joinchat/")[1]
-                        invite_hash = invite_hash.split("/")[0].split("?")[0]
-                        from telethon.tl.functions.messages import ImportChatInviteRequest
-                        try:
-                            await client(ImportChatInviteRequest(invite_hash))
-                            await asyncio.sleep(2)
-                        except Exception:
-                            pass
-                        entity = await client.get_entity(clean_c)
-                    else:
-                        if "t.me/" in clean_c:
-                            clean_c = clean_c.split("t.me/")[-1].split("/")[0].split("?")[0]
-                        clean_c = clean_c.lstrip("@")
-                        if clean_c.isdigit():
-                            clean_c = int(clean_c)
-                        entity = await client.get_entity(clean_c)
-                        try:
-                            await client(JoinChannelRequest(entity))
-                            await asyncio.sleep(2)
-                        except Exception:
-                            pass
-
-                    try:
+                    if send_type == "users":
+                        clean_u = target_str
+                        if "t.me/" in clean_u:
+                            clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
+                        clean_u = clean_u.lstrip("@")
+                        if clean_u.isdigit():
+                            clean_u = int(clean_u)
+                        entity = await client.get_entity(clean_u)
                         if media_path and os.path.exists(media_path):
                             try:
                                 await client.send_message(entity, msg, file=media_path)
@@ -280,102 +270,129 @@ async def _do_send_task(task_id: int):
                                     raise m_err
                         else:
                             await client.send_message(entity, msg)
-                    except Exception as send_err:
-                        err_str = str(send_err)
-                        if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                            post_id = 1
-                            async for m in client.iter_messages(entity, limit=1):
-                                post_id = m.id
-                                break
-                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                        else:
-                            raise send_err
 
-                elif send_type == "comments":
-                    clean_t = target.strip()
-                    if "t.me/" in clean_t:
-                        path_parts = clean_t.split("t.me/")[1].split("/")
-                        channel = path_parts[0]
-                        post_id = int(path_parts[1]) if len(path_parts) > 1 and path_parts[1].isdigit() else 1
-                    elif ":" in clean_t:
-                        parts = clean_t.rsplit(":", 1)
-                        channel = parts[0]
-                        post_id = int(parts[1]) if parts[1].isdigit() else 1
-                    else:
-                        channel = clean_t
-                        entity = await client.get_entity(channel)
-                        post_id = 1
-                        async for m in client.iter_messages(entity, limit=1):
-                            post_id = m.id
-                            break
-                    await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
-
-                elif send_type == "combo":
-                    clean_t = target.strip()
-                    is_post_link = (("t.me/" in clean_t and "/" in clean_t.split("t.me/")[1] and clean_t.split("t.me/")[1].split("/")[1].isdigit()) or (":" in clean_t and clean_t.rsplit(":", 1)[1].isdigit()))
-                    
-                    if is_post_link:
-                        if "t.me/" in clean_t:
-                            path_parts = clean_t.split("t.me/")[1].split("/")
-                            channel = path_parts[0]
-                            post_id = int(path_parts[1])
+                    elif send_type == "chats":
+                        clean_c = target_str
+                        if "t.me/+" in clean_c or "joinchat/" in clean_c:
+                            invite_hash = clean_c.split("t.me/+")[1] if "t.me/+" in clean_c else clean_c.split("joinchat/")[1]
+                            invite_hash = invite_hash.split("/")[0].split("?")[0]
+                            from telethon.tl.functions.messages import ImportChatInviteRequest
+                            try:
+                                await client(ImportChatInviteRequest(invite_hash))
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
+                            entity = await client.get_entity(clean_c)
                         else:
-                            parts = clean_t.rsplit(":", 1)
-                            channel = parts[0]
-                            post_id = int(parts[1])
-                        await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
-                    else:
-                        from telethon.tl.types import Channel
-                        entity = await client.get_entity(clean_t)
-                        if isinstance(entity, Channel) and entity.broadcast:
-                            post_id = 1
-                            async for m in client.iter_messages(entity, limit=1):
-                                post_id = m.id
-                                break
-                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                        else:
+                            if "t.me/" in clean_c:
+                                clean_c = clean_c.split("t.me/")[-1].split("/")[0].split("?")[0]
+                            clean_c = clean_c.lstrip("@")
+                            if clean_c.isdigit():
+                                clean_c = int(clean_c)
+                            entity = await client.get_entity(clean_c)
                             try:
                                 await client(JoinChannelRequest(entity))
                                 await asyncio.sleep(2)
                             except Exception:
                                 pass
-                            try:
-                                if media_path and os.path.exists(media_path):
-                                    try:
-                                        await client.send_message(entity, msg, file=media_path)
-                                    except Exception as m_err:
-                                        m_str = str(m_err).lower()
-                                        if "media" in m_str or "photo" in m_str or "file" in m_str:
-                                            await client.send_message(entity, msg)
-                                        else:
-                                            raise m_err
-                                else:
-                                    await client.send_message(entity, msg)
-                            except Exception as send_err:
-                                err_str = str(send_err)
-                                if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                                    post_id = 1
-                                    async for m in client.iter_messages(entity, limit=1):
-                                        post_id = m.id
-                                        break
-                                    await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                else:
-                                    raise send_err
+
+                        try:
+                            if media_path and os.path.exists(media_path):
+                                try:
+                                    await client.send_message(entity, msg, file=media_path)
+                                except Exception as m_err:
+                                    m_str = str(m_err).lower()
+                                    if "media" in m_str or "photo" in m_str or "file" in m_str:
+                                        await client.send_message(entity, msg)
+                                    else:
+                                        raise m_err
+                            else:
+                                await client.send_message(entity, msg)
+                        except Exception as send_err:
+                            err_str = str(send_err)
+                            if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                post_id = 1
+                                async for m in client.iter_messages(entity, limit=1):
+                                    post_id = m.id
+                                    break
+                                await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                            else:
+                                raise send_err
+
+                    elif send_type == "comments":
+                        clean_t = target_str
+                        if "t.me/" in clean_t:
+                            path_parts = clean_t.split("t.me/")[1].split("/")
+                            channel = path_parts[0]
+                            post_id = int(path_parts[1]) if len(path_parts) > 1 and path_parts[1].isdigit() else 1
+                        elif ":" in clean_t:
+                            parts = clean_t.rsplit(":", 1)
+                            channel = parts[0]
+                            post_id = int(parts[1]) if parts[1].isdigit() else 1
+                        else:
+                            channel = clean_t
+                            entity = await client.get_entity(channel)
+                            post_id = 1
+                            async for m in client.iter_messages(entity, limit=1):
+                                post_id = m.id
+                                break
+                        await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
+
+                    elif send_type == "combo":
+                        clean_t = target_str
+                        is_post_link = (("t.me/" in clean_t and "/" in clean_t.split("t.me/")[1] and clean_t.split("t.me/")[1].split("/")[1].isdigit()) or (":" in clean_t and clean_t.rsplit(":", 1)[1].isdigit()))
+                        
+                        if is_post_link:
+                            if "t.me/" in clean_t:
+                                path_parts = clean_t.split("t.me/")[1].split("/")
+                                channel = path_parts[0]
+                                post_id = int(path_parts[1])
+                            else:
+                                parts = clean_t.rsplit(":", 1)
+                                channel = parts[0]
+                                post_id = int(parts[1])
+                            await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
+                        else:
+                            from telethon.tl.types import Channel
+                            entity = await client.get_entity(clean_t)
+                            if isinstance(entity, Channel) and entity.broadcast:
+                                post_id = 1
+                                async for m in client.iter_messages(entity, limit=1):
+                                    post_id = m.id
+                                    break
+                                await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                            else:
+                                try:
+                                    await client(JoinChannelRequest(entity))
+                                    await asyncio.sleep(2)
+                                except Exception:
+                                    pass
+                                try:
+                                    if media_path and os.path.exists(media_path):
+                                        try:
+                                            await client.send_message(entity, msg, file=media_path)
+                                        except Exception as m_err:
+                                            m_str = str(m_err).lower()
+                                            if "media" in m_str or "photo" in m_str or "file" in m_str:
+                                                await client.send_message(entity, msg)
+                                            else:
+                                                raise m_err
+                                    else:
+                                        await client.send_message(entity, msg)
+                                except Exception as send_err:
+                                    err_str = str(send_err)
+                                    if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                        post_id = 1
+                                        async for m in client.iter_messages(entity, limit=1):
+                                            post_id = m.id
+                                            break
+                                        await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                                    else:
+                                        raise send_err
 
                 sent_this_account += 1
-                await log_event("info", "sender", f"[{account['phone']}] → {target}: ✓")
-
-                # Live update to DB for real-time frontend monitoring
-                try:
-                    db_up = await get_db()
-                    await db_up.execute("UPDATE send_tasks SET total_sent = total_sent + 1 WHERE id = ?", (task_id,))
-                    from datetime import datetime
-                    today_str = datetime.now().strftime("%Y-%m-%d")
-                    await db_up.execute("UPDATE daily_stats SET sent_total = sent_total + 1 WHERE date = ?", (today_str,))
-                    await db_up.commit()
-                    await db_up.close()
-                except Exception:
-                    pass
+                await log_event("info", "sender", f"[{account['phone']}] → {target_str}: ✓")
+                await _increment_stats(task_id, success=True)
 
                 delay = random.randint(delay_min, delay_max)
                 await asyncio.sleep(delay)
@@ -391,24 +408,16 @@ async def _do_send_task(task_id: int):
                 break
 
             except UserPrivacyRestrictedError:
-                try:
-                    db_up = await get_db()
-                    await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
-                    await db_up.commit()
-                    await db_up.close()
-                except Exception:
-                    pass
-                await log_event("warn", "sender", f"[{account['phone']}] → {target}: privacy restricted, skipping")
+                await _increment_stats(task_id, success=False)
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: privacy restricted, skipping")
+
+            except TimeoutError:
+                await _increment_stats(task_id, success=False)
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: timeout (>40s), skipping")
 
             except Exception as e:
-                try:
-                    db_up = await get_db()
-                    await db_up.execute("UPDATE send_tasks SET total_failed = total_failed + 1 WHERE id = ?", (task_id,))
-                    await db_up.commit()
-                    await db_up.close()
-                except Exception:
-                    pass
-                await log_event("warn", "sender", f"[{account['phone']}] → {target}: {str(e)[:120]}")
+                await _increment_stats(task_id, success=False)
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: {str(e)[:120]}")
                 await asyncio.sleep(3)
 
     while task_id in _active_task_loops:
@@ -428,7 +437,7 @@ async def _do_send_task(task_id: int):
                 workers.append(_send_for_account(account, acc_targets))
 
         if workers:
-            await asyncio.gather(*workers)
+            await asyncio.gather(*workers, return_exceptions=True)
 
         # If one-time mode or users send type
         if send_type == "users" or repeat_interval <= 0:
