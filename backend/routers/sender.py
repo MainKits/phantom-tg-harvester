@@ -146,18 +146,46 @@ async def _get_active_accounts(db) -> list:
     ]
 
 
-async def _mark_spam_block(account_id: int):
+async def _mark_spam_block(account_id: int, reason: str = "Спам-блок від Telegram"):
     db = await get_db()
+    cursor = await db.execute("SELECT phone FROM accounts WHERE id = ?", (account_id,))
+    row = await cursor.fetchone()
+    phone = row[0] if row else f"#{account_id}"
     await db.execute("UPDATE accounts SET status = 'spam-block' WHERE id = ?", (account_id,))
     await db.commit()
     await db.close()
+    await log_event("alert", "sender", f"⚠️ Акаунт {phone} отримав спам-блок: {reason}")
+    try:
+        from .system import add_system_alert
+        add_system_alert("spam-block", phone, f"Акаунт {phone} отримав спам-блок від Telegram!", reason)
+    except Exception:
+        pass
+
+
+async def _mark_banned(account_id: int, reason: str = "Акаунт заблоковано Telegram"):
+    db = await get_db()
+    cursor = await db.execute("SELECT phone FROM accounts WHERE id = ?", (account_id,))
+    row = await cursor.fetchone()
+    phone = row[0] if row else f"#{account_id}"
+    await db.execute("UPDATE accounts SET status = 'banned' WHERE id = ?", (account_id,))
+    await db.commit()
+    await db.close()
+    await log_event("alert", "sender", f"🚫 Акаунт {phone} заблоковано: {reason}")
+    try:
+        from .system import add_system_alert
+        add_system_alert("banned", phone, f"Акаунт {phone} заблоковано Telegram!", reason)
+    except Exception:
+        pass
 
 
 async def _do_send_task(task_id: int):
     """Background worker: sends messages in parallel across multiple accounts with target partitioning."""
     from ..services.telegram_engine import telegram_engine
     from telethon.tl.functions.channels import JoinChannelRequest
-    from telethon.errors import FloodWaitError, UserPrivacyRestrictedError, PeerFloodError
+    from telethon.errors import (
+        FloodWaitError, UserPrivacyRestrictedError, PeerFloodError,
+        UserDeactivatedBanError, PhoneNumberBannedError
+    )
 
     db = await get_db()
     cursor = await db.execute("SELECT * FROM send_tasks WHERE id = ?", (task_id,))
@@ -296,6 +324,12 @@ async def _do_send_task(task_id: int):
                             except Exception:
                                 pass
 
+                        # Auto-handle bot captchas and sponsor channel requirements after joining
+                        try:
+                            await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                        except Exception:
+                            pass
+
                         try:
                             if media_path and os.path.exists(media_path):
                                 try:
@@ -310,14 +344,34 @@ async def _do_send_task(task_id: int):
                                 await client.send_message(entity, msg)
                         except Exception as send_err:
                             err_str = str(send_err)
+                            handled_write_error = False
                             if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                                post_id = 1
-                                async for m in client.iter_messages(entity, limit=1):
-                                    post_id = m.id
-                                    break
-                                await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                            else:
-                                raise send_err
+                                # Attempt solving bot captcha / sponsor subscription in case write was gated
+                                try:
+                                    did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                                    if did_solve:
+                                        await asyncio.sleep(2)
+                                        if media_path and os.path.exists(media_path):
+                                            try:
+                                                await client.send_message(entity, msg, file=media_path)
+                                                handled_write_error = True
+                                            except Exception:
+                                                pass
+                                        else:
+                                            await client.send_message(entity, msg)
+                                            handled_write_error = True
+                                except Exception:
+                                    pass
+
+                            if not handled_write_error:
+                                if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                    post_id = 1
+                                    async for m in client.iter_messages(entity, limit=1):
+                                        post_id = m.id
+                                        break
+                                    await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                                else:
+                                    raise send_err
 
                     elif send_type == "comments":
                         clean_t = target_str
@@ -368,6 +422,11 @@ async def _do_send_task(task_id: int):
                                 except Exception:
                                     pass
                                 try:
+                                    await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                                except Exception:
+                                    pass
+
+                                try:
                                     if media_path and os.path.exists(media_path):
                                         try:
                                             await client.send_message(entity, msg, file=media_path)
@@ -381,14 +440,33 @@ async def _do_send_task(task_id: int):
                                         await client.send_message(entity, msg)
                                 except Exception as send_err:
                                     err_str = str(send_err)
+                                    handled_write_error = False
                                     if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                                        post_id = 1
-                                        async for m in client.iter_messages(entity, limit=1):
-                                            post_id = m.id
-                                            break
-                                        await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                    else:
-                                        raise send_err
+                                        try:
+                                            did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                                            if did_solve:
+                                                await asyncio.sleep(2)
+                                                if media_path and os.path.exists(media_path):
+                                                    try:
+                                                        await client.send_message(entity, msg, file=media_path)
+                                                        handled_write_error = True
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    await client.send_message(entity, msg)
+                                                    handled_write_error = True
+                                        except Exception:
+                                            pass
+
+                                    if not handled_write_error:
+                                        if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                            post_id = 1
+                                            async for m in client.iter_messages(entity, limit=1):
+                                                post_id = m.id
+                                                break
+                                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                                        else:
+                                            raise send_err
 
                 sent_this_account += 1
                 await log_event("info", "sender", f"[{account['phone']}] → {target_str}: ✓")
@@ -407,6 +485,11 @@ async def _do_send_task(task_id: int):
                 await _mark_spam_block(account["id"])
                 break
 
+            except (UserDeactivatedBanError, PhoneNumberBannedError) as e:
+                await log_event("error", "sender", f"[{account['phone']}] Banned/Deactivated: {e}")
+                await _mark_banned(account["id"], account["phone"], str(e))
+                break
+
             except UserPrivacyRestrictedError:
                 await _increment_stats(task_id, success=False)
                 await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: privacy restricted, skipping")
@@ -416,6 +499,16 @@ async def _do_send_task(task_id: int):
                 await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: timeout (>40s), skipping")
 
             except Exception as e:
+                err_text = str(e).lower()
+                if "banned" in err_text or "deactivated" in err_text:
+                    await log_event("error", "sender", f"[{account['phone']}] Banned: {e}")
+                    await _mark_banned(account["id"], account["phone"], str(e))
+                    break
+                if "spam" in err_text or "flood" in err_text or ("restricted" in err_text and "mutual" in err_text):
+                    await log_event("warn", "sender", f"[{account['phone']}] Spam block detected: {e}")
+                    await _mark_spam_block(account["id"])
+                    break
+
                 await _increment_stats(task_id, success=False)
                 await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: {str(e)[:120]}")
                 await asyncio.sleep(3)

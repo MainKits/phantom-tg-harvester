@@ -118,3 +118,43 @@ async def install_update(download_url: str = Form(...)):
 async def _exit_later():
     await asyncio.sleep(2)
     os._exit(0)
+
+
+# ─── System Toast Alerts ───────────────────────────────────────────────────────
+_system_alerts = []
+
+def add_system_alert(alert_type: str, phone: str, message: str, details: str = ""):
+    """Store a toast alert in memory for the frontend notification system."""
+    import time
+    alert = {
+        "id": f"{int(time.time() * 1000)}",
+        "type": alert_type,  # 'spam-block' | 'banned' | 'warn'
+        "phone": phone,
+        "message": message,
+        "details": details,
+        "timestamp": int(time.time()),
+        "read": False
+    }
+    _system_alerts.append(alert)
+    if len(_system_alerts) > 30:
+        _system_alerts.pop(0)
+    return alert
+
+
+@router.get("/alerts")
+async def get_system_alerts():
+    """Get recent unacknowledged alerts from the last 10 minutes."""
+    import time
+    now = time.time()
+    recent = [a for a in _system_alerts if (now - a["timestamp"]) < 600 and not a.get("read", False)]
+    return {"alerts": recent}
+
+
+@router.post("/alerts/ack")
+async def ack_system_alert(alert_id: str = Form(...)):
+    """Acknowledge / dismiss a toast alert."""
+    for a in _system_alerts:
+        if a["id"] == alert_id:
+            a["read"] = True
+    return {"success": True}
+

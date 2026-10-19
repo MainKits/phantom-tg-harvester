@@ -11,6 +11,7 @@ import MediaTools from './pages/MediaTools'
 import TikTokManager from './pages/TikTokManager'
 import AdminLicense from './pages/AdminLicense'
 import LicenseScreen from './pages/LicenseScreen'
+import AlertToast from './components/AlertToast'
 import { API } from './apiConfig'
 import './index.css'
 
@@ -77,6 +78,7 @@ function App() {
 
   return (
     <BrowserRouter>
+      <AlertToast />
       <Sidebar />
       <main className="main-content">
         <Routes>

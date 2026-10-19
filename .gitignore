@@ -10,6 +10,10 @@ ENV/
 
 # Database & Sessions (CRITICAL FOR SECURITY)
 backend/phantom_harvester.db*
+backend/phantom.db*
+*.db
+*.db-wal
+*.db-shm
 backend/sessions/*.session
 backend/sessions/*.session-journal
 *.session
