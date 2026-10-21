@@ -30,7 +30,8 @@ dist/
 dist-electron/
 dist-backend/
 build-backend/
-build/
+dist-mac/
+!build/installer.nsh
 *.exe
 *.dmg
 *.blockmap
