@@ -52,6 +52,17 @@ export default function Sender() {
             setTaskId(data.task.id)
             setSentCount(data.task.total_sent || 0)
             setErrorCount(data.task.total_failed || 0)
+            if (data.targets_text !== undefined && data.targets_text !== '') {
+              setTargetsText(prev => {
+                if (prev !== data.targets_text) {
+                  if (typeof window !== 'undefined') {
+                    localStorage.setItem('phantom_sender_targets', data.targets_text)
+                  }
+                  return data.targets_text
+                }
+                return prev
+              })
+            }
           } else {
             setSending(false)
           }
