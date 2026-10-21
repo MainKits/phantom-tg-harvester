@@ -12,10 +12,11 @@ if getattr(sys, 'frozen', False):
     sys.path.insert(0, bundle_dir)
 
 import uvicorn
+from backend.main import app
 
 if __name__ == '__main__':
     uvicorn.run(
-        "backend.main:app",
+        app,
         host="127.0.0.1",
         port=8000,
         log_level="warning",

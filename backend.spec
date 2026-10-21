@@ -3,7 +3,28 @@ PyInstaller spec file for Phantom TG Harvester backend.
 Run: pyinstaller backend.spec
 """
 import os, sys
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 block_cipher = None
+
+hidden_imports = [
+    'uvicorn',
+    'fastapi',
+    'starlette',
+    'aiosqlite',
+    'telethon',
+    'pydantic',
+    'multipart',
+    'socks',
+    'aiohttp',
+    'httpx',
+    'tiktok_uploader',
+    'playwright',
+    'Pillow',
+] + collect_submodules('fastapi') \
+  + collect_submodules('starlette') \
+  + collect_submodules('uvicorn') \
+  + collect_submodules('telethon') \
+  + collect_submodules('backend')
 
 # Collect all backend modules
 a = Analysis(
@@ -13,29 +34,7 @@ a = Analysis(
     datas=[
         ('backend', 'backend'),
     ],
-    hiddenimports=[
-        'uvicorn',
-        'uvicorn.logging',
-        'uvicorn.loops',
-        'uvicorn.loops.auto',
-        'uvicorn.protocols',
-        'uvicorn.protocols.http',
-        'uvicorn.protocols.http.auto',
-        'uvicorn.protocols.websockets',
-        'uvicorn.protocols.websockets.auto',
-        'uvicorn.lifespan',
-        'uvicorn.lifespan.on',
-        'fastapi',
-        'aiosqlite',
-        'telethon',
-        'pydantic',
-        'multipart',
-        'socks',
-        'aiohttp',
-        'httpx',
-        'tiktok_uploader',
-        'playwright',
-    ],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
