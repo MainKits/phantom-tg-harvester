@@ -423,17 +423,14 @@ async def _do_send_task(task_id: int):
                                 try:
                                     await client.send_message(entity, msg, file=media_path)
                                 except Exception as m_err:
-                                    m_str = str(m_err).lower()
-                                    if "media" in m_str or "photo" in m_str or "file" in m_str:
-                                        await client.send_message(entity, msg)
-                                    else:
-                                        raise m_err
+                                    # If chat disallows media/photos, fallback to sending plain text
+                                    await client.send_message(entity, msg)
                             else:
                                 await client.send_message(entity, msg)
                         except Exception as send_err:
                             err_str = str(send_err)
                             handled_write_error = False
-                            if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                            if "ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str:
                                 # Attempt solving bot captcha / sponsor subscription in case write was gated
                                 try:
                                     did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity)
@@ -444,7 +441,8 @@ async def _do_send_task(task_id: int):
                                                 await client.send_message(entity, msg, file=media_path)
                                                 handled_write_error = True
                                             except Exception:
-                                                pass
+                                                await client.send_message(entity, msg)
+                                                handled_write_error = True
                                         else:
                                             await client.send_message(entity, msg)
                                             handled_write_error = True
@@ -452,15 +450,17 @@ async def _do_send_task(task_id: int):
                                     pass
 
                             if not handled_write_error:
-                                if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                # ONLY try comments fallback if target is an actual broadcast channel
+                                is_broadcast = getattr(entity, 'broadcast', False)
+                                if is_broadcast and ("ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str):
                                     post_id = 1
                                     async for m in client.iter_messages(entity, limit=1):
                                         post_id = m.id
                                         break
                                     try:
                                         await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                    except Exception as comm_err:
-                                        raise Exception(f"PERM_NO_WRITE: канал закритий (немає доступу для запису або коментарів: {comm_err})")
+                                    except Exception:
+                                        raise send_err
                                 else:
                                     raise send_err
 
@@ -600,15 +600,16 @@ async def _do_send_task(task_id: int):
                                             pass
 
                                     if not handled_write_error:
-                                        if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
+                                        is_broadcast = getattr(entity, 'broadcast', False)
+                                        if is_broadcast and ("ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str):
                                             post_id = 1
                                             async for m in client.iter_messages(entity, limit=1):
                                                 post_id = m.id
                                                 break
                                             try:
                                                 await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                            except Exception as comm_err:
-                                                raise Exception(f"PERM_NO_WRITE: канал закритий (немає доступу для запису або коментарів: {comm_err})")
+                                            except Exception:
+                                                raise send_err
                                         else:
                                             raise send_err
 
@@ -684,21 +685,23 @@ async def _do_send_task(task_id: int):
                 await asyncio.sleep(1)
                 continue
 
-            except UserBannedInChannelError as e:
+            except UserBannedInChannelError:
+                # Account is restricted/banned in this group, but the group itself is valid! DO NOT delete from base.
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Заборонено писати в цьому чаті (бан або обмеження)", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: акаунт обмежено/заблоковано в цьому чаті, пропуск")
                 await asyncio.sleep(1)
                 continue
 
-            except InputUserDeactivatedError as e:
+            except InputUserDeactivatedError:
                 await _increment_stats(task_id, success=False)
                 await _remove_dead_target(target_str, "Акаунт користувача видалено", account["phone"])
                 await asyncio.sleep(1)
                 continue
 
             except (ChatWriteForbiddenError, ChatAdminRequiredError) as e:
+                # Chat is valid, but this account has no permission (captcha, slowmode, media restriction, or admin only). DO NOT delete from base!
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Закритий канал (писати можуть лише адміни, коментарі відсутні)", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: немає прав на запис (обмеження в чаті, капча або тільки адміни), пропуск")
                 await asyncio.sleep(1)
                 continue
 
@@ -714,7 +717,7 @@ async def _do_send_task(task_id: int):
 
             except UserPrivacyRestrictedError:
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Приватні налаштування (заборона повідомлень не від контактів)", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: приватні налаштування користувача, пропуск")
                 await asyncio.sleep(1)
                 continue
 
@@ -724,13 +727,6 @@ async def _do_send_task(task_id: int):
 
             except Exception as e:
                 err_text = str(e).lower()
-                # Check for dead channel markers
-                if "perm_no_write" in err_text or "chatwriteforbidden" in err_text or "chatadminrequired" in err_text:
-                    await _increment_stats(task_id, success=False)
-                    await _remove_dead_target(target_str, "Канал закрито (немає доступу до запису чи коментарів)", account["phone"])
-                    await asyncio.sleep(1)
-                    continue
-
                 if "cannot find any entity" in err_text:
                     await _increment_stats(task_id, success=False)
                     await _remove_dead_target(target_str, "Чат не знайдено", account["phone"])
