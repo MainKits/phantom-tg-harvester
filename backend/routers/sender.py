@@ -414,7 +414,9 @@ async def _do_send_task(task_id: int):
 
                         # Auto-handle bot captchas and sponsor channel requirements after joining
                         try:
-                            await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                            _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+                            await asyncio.sleep(1.5)
+                            await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
                         except Exception:
                             pass
 
@@ -433,7 +435,8 @@ async def _do_send_task(task_id: int):
                             if "ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str:
                                 # Attempt solving bot captcha / sponsor subscription in case write was gated
                                 try:
-                                    did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                                    _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+                                    did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
                                     if did_solve:
                                         await asyncio.sleep(2)
                                         if media_path and os.path.exists(media_path):
@@ -563,7 +566,9 @@ async def _do_send_task(task_id: int):
                                 except Exception:
                                     pass
                                 try:
-                                    await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                                    _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+                                    await asyncio.sleep(1.5)
+                                    await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
                                 except Exception:
                                     pass
 
@@ -584,7 +589,8 @@ async def _do_send_task(task_id: int):
                                     handled_write_error = False
                                     if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
                                         try:
-                                            did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity)
+                                            _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+                                            did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
                                             if did_solve:
                                                 await asyncio.sleep(2)
                                                 if media_path and os.path.exists(media_path):

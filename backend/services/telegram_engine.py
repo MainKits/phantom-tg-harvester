@@ -327,14 +327,17 @@ class TelegramEngine:
         else:
             await client.send_message(entity, comment_text, comment_to=post_id)
 
-    async def handle_captcha_and_subscriptions(self, client: TelegramClient, entity, me=None) -> bool:
+    async def handle_captcha_and_subscriptions(self, client: TelegramClient, entity, me=None, log_fn=None) -> bool:
         """
-        Detect bot verification/captcha messages and mandatory sponsor channel subscriptions.
-        Automatically clicks verification buttons and subscribes to required channels.
-        Returns True if any verification button was clicked or sponsor channel joined.
+        Detect and automatically solve:
+        1. Inline click-to-verify buttons ("I am not a bot", "Verify", "Accept rules", etc.)
+        2. Math captchas (e.g. "5 + 3 = ?", clicks button with "8" or sends answer)
+        3. Mandatory sponsor channel subscriptions (extracts public and private channels from text AND buttons, joins them, and clicks verification)
+        4. DM verification bots (follows /start link in buttons to verify)
         """
         import re
         from telethon.tl.functions.channels import JoinChannelRequest
+        from telethon.tl.functions.messages import ImportChatInviteRequest
 
         action_taken = False
         if me is None:
@@ -344,12 +347,14 @@ class TelegramEngine:
                 me = None
 
         try:
-            # Check the last 5 messages in chat for bot captchas or subscription prompts
-            async for msg in client.iter_messages(entity, limit=5):
+            # Check the last 12 messages in chat for bot captchas or subscription prompts
+            async for msg in client.iter_messages(entity, limit=12):
                 if not msg:
                     continue
 
-                txt = (msg.text or "").lower()
+                txt_raw = msg.text or ""
+                txt = txt_raw.lower()
+
                 user_mentioned = False
                 if me:
                     if me.username and me.username.lower() in txt:
@@ -361,58 +366,158 @@ class TelegramEngine:
 
                 is_verification = any(k in txt for k in [
                     "капч", "робот", "проверк", "вериф", "human", "verify", "captcha",
-                    "кнопк", "підтверд", "подтверд", "правила", "подпиш", "підпиш", "sponsor", "спонсор"
+                    "кнопк", "підтверд", "подтверд", "правила", "подпиш", "підпиш", "sponsor", "спонсор",
+                    "привет", "привіт", "добро пожаловать", "ласкаво просимо", "welcome"
                 ])
 
-                # 1. Click inline captcha buttons
+                # ─── 1. MANDATORY SPONSOR CHANNEL SUBSCRIPTIONS ─────────────
+                channels_to_join = set()
+                invites_to_join = set()
+
+                # Check text for sponsor links
+                for m_url in re.findall(r"(?:https?://)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)([a-zA-Z0-9_\-]+)", txt_raw):
+                    invites_to_join.add(m_url.split("?")[0].strip())
+                for m_ch in re.findall(r"(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]{4,32})", txt_raw):
+                    if m_ch.lower() not in ("joinchat", "share", "addstickers"):
+                        channels_to_join.add(m_ch.lstrip("@"))
+                for u in re.findall(r"@([a-zA-Z0-9_]{4,32})", txt_raw):
+                    channels_to_join.add(u.lstrip("@"))
+
+                # Check buttons for sponsor channel links
                 if msg.buttons:
                     for row in msg.buttons:
                         for btn in row:
-                            b_text = (btn.text or "").lower()
+                            if hasattr(btn, 'url') and btn.url:
+                                u_str = str(btn.url)
+                                if "/+" in u_str or "joinchat/" in u_str:
+                                    inv = u_str.split("/+")[-1] if "/+" in u_str else u_str.split("joinchat/")[-1]
+                                    inv = inv.split("?")[0].split("/")[0].strip()
+                                    if inv:
+                                        invites_to_join.add(inv)
+                                elif "t.me/" in u_str or "telegram.me/" in u_str:
+                                    ch = u_str.split("t.me/")[-1] if "t.me/" in u_str else u_str.split("telegram.me/")[-1]
+                                    ch = ch.split("?")[0].split("/")[0].strip().lstrip("@")
+                                    if ch and ch.lower() not in ("joinchat", "share", "addstickers") and not ch.endswith("bot"):
+                                        channels_to_join.add(ch)
+
+                # Join public sponsor channels
+                for ch in channels_to_join:
+                    if hasattr(entity, "username") and entity.username and entity.username.lower() == ch.lower():
+                        continue
+                    try:
+                        ch_ent = await client.get_entity(ch)
+                        await client(JoinChannelRequest(ch_ent))
+                        action_taken = True
+                        if log_fn:
+                            await log_fn(f"📢 Підписано на спонсорський канал: @{ch}")
+                        await asyncio.sleep(1.5)
+                    except Exception:
+                        pass
+
+                # Join private sponsor channels
+                for inv in invites_to_join:
+                    try:
+                        await client(ImportChatInviteRequest(inv))
+                        action_taken = True
+                        if log_fn:
+                            await log_fn(f"📢 Приєднано приватний спонсорський канал за посиланням")
+                        await asyncio.sleep(1.5)
+                    except Exception:
+                        pass
+
+                # ─── 2. MATH CAPTCHAS (e.g. 7 + 4 = 11) ───────────────────────
+                math_match = re.search(r"(\d{1,3})\s*([\+\-\*])\s*(\d{1,3})", txt_raw)
+                math_ans = None
+                if math_match:
+                    try:
+                        n1, op, n2 = int(math_match.group(1)), math_match.group(2), int(math_match.group(3))
+                        if op == '+':
+                            math_ans = n1 + n2
+                        elif op == '-':
+                            math_ans = n1 - n2
+                        elif op == '*':
+                            math_ans = n1 * n2
+                    except Exception:
+                        math_ans = None
+
+                # ─── 3. CLICK INLINE BUTTONS (VERIFY / CONFIRM / MATH) ───────
+                if msg.buttons:
+                    for row in msg.buttons:
+                        for btn in row:
+                            b_text = (btn.text or "").strip().lower()
+
+                            # Math captcha button match
+                            if math_ans is not None:
+                                if b_text == str(math_ans) or b_text == f"[{math_ans}]" or b_text == f"✅ {math_ans}":
+                                    try:
+                                        await btn.click()
+                                        action_taken = True
+                                        if log_fn:
+                                            await log_fn(f"🤖 Розв'язано математичну капчу: {math_ans}")
+                                        await asyncio.sleep(1.5)
+                                        break
+                                    except Exception:
+                                        pass
+
+                            # Standard verify keywords
                             is_verify_btn = any(k in b_text for k in [
-                                "я не робот", "я человек", "не робот", "пройти", "вериф", "верифи",
-                                "verify", "human", "підтверд", "подтверд", "согласен", "agree",
-                                "accept", "старт", "start", "ok", "ок", "✅", "🟢", "👍", "🆗",
-                                "подписался", "підписався", "проверить", "перевірити", "готово", "done"
+                                "я не робот", "я не бот", "не робот", "я человек", "людина", "не бот",
+                                "пройти", "вериф", "верифи", "verify", "human", "підтверд", "подтверд",
+                                "согласен", "согласна", "згоден", "згодна", "agree", "accept", "принять",
+                                "правила", "старт", "start", "ok", "ок", "✅", "🟢", "👍", "🆗", "🔓",
+                                "подписался", "підписався", "проверить", "перевірити", "готово", "done",
+                                "check", "продолжить", "продовжити", "continue", "вступил", "вступив",
+                                "разблокировать", "розблокувати", "click here", "натисніть", "нажмите"
                             ])
+
                             if is_verify_btn or (user_mentioned and is_verification):
                                 try:
                                     await btn.click()
                                     action_taken = True
+                                    if log_fn:
+                                        await log_fn(f"🤖 Натиснуто кнопку проходження перевірки: «{btn.text}»")
                                     await asyncio.sleep(1.5)
                                     break
                                 except Exception:
                                     pass
 
-                # 2. Check for required channel subscriptions in message text
-                if any(w in txt for w in ["подпиш", "підпиш", "subscri", "канал", "канали", "спонсор"]):
-                    channels = re.findall(r"(?:https?://)?t\.me/([a-zA-Z0-9_]{4,32})", msg.text or "")
-                    usernames = re.findall(r"@([a-zA-Z0-9_]{4,32})", msg.text or "")
-                    candidates = set(channels + usernames)
-                    for ch in candidates:
-                        ch_clean = ch.strip().lstrip("@")
-                        if hasattr(entity, "username") and entity.username and entity.username.lower() == ch_clean.lower():
-                            continue
+                            # DM bot verification link in button
+                            if hasattr(btn, 'url') and btn.url and ("?start=" in btn.url or "?startgroup=" in btn.url):
+                                bot_m = re.search(r"(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+bot)\?(start(?:group)?)=([a-zA-Z0-9_\-]+)", btn.url, re.I)
+                                if bot_m:
+                                    b_username = bot_m.group(1)
+                                    b_arg = bot_m.group(3)
+                                    try:
+                                        bot_ent = await client.get_entity(b_username)
+                                        await client.send_message(bot_ent, f"/start {b_arg}")
+                                        action_taken = True
+                                        await asyncio.sleep(2)
+                                        # Click verify button in bot chat if present
+                                        async for bot_msg in client.iter_messages(bot_ent, limit=2):
+                                            if bot_msg and bot_msg.buttons:
+                                                for b_row in bot_msg.buttons:
+                                                    for b_b in b_row:
+                                                        try:
+                                                            await b_b.click()
+                                                            await asyncio.sleep(1)
+                                                            break
+                                                        except Exception:
+                                                            pass
+                                    except Exception:
+                                        pass
+
+                # If text asks to send the math answer directly in chat
+                if math_ans is not None and not msg.buttons:
+                    if any(k in txt for k in ["отправьте ответ", "напишите ответ", "надішліть відповідь", "напишіть відповідь", "ответ", "відповідь"]):
                         try:
-                            ch_ent = await client.get_entity(ch_clean)
-                            await client(JoinChannelRequest(ch_ent))
+                            await client.send_message(entity, str(math_ans))
                             action_taken = True
+                            if log_fn:
+                                await log_fn(f"🤖 Відправлено відповідь на капчу в чат: {math_ans}")
                             await asyncio.sleep(1.5)
                         except Exception:
                             pass
 
-                    # Click confirmation button if present
-                    if msg.buttons:
-                        for row in msg.buttons:
-                            for btn in row:
-                                b_text = (btn.text or "").lower()
-                                if any(k in b_text for k in ["подписал", "підписав", "проверить", "перевірити", "готово", "done", "check"]):
-                                    try:
-                                        await btn.click()
-                                        action_taken = True
-                                        await asyncio.sleep(1)
-                                    except Exception:
-                                        pass
         except Exception:
             pass
         return action_taken
