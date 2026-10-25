@@ -327,7 +327,7 @@ class TelegramEngine:
         else:
             await client.send_message(entity, comment_text, comment_to=post_id)
 
-    async def handle_captcha_and_subscriptions(self, client: TelegramClient, entity, me=None, log_fn=None) -> bool:
+    async def handle_captcha_and_subscriptions(self, client: TelegramClient, entity, me=None, log_fn=None, on_sponsor_channel=None) -> bool:
         """
         Detect and automatically solve:
         1. Inline click-to-verify buttons ("I am not a bot", "Verify", "Accept rules", etc.)
@@ -410,6 +410,11 @@ class TelegramEngine:
                         action_taken = True
                         if log_fn:
                             await log_fn(f"📢 Підписано на спонсорський канал: @{ch}")
+                        if on_sponsor_channel:
+                            try:
+                                await on_sponsor_channel(f"@{ch}")
+                            except Exception:
+                                pass
                         await asyncio.sleep(1.5)
                     except Exception:
                         pass
@@ -421,6 +426,11 @@ class TelegramEngine:
                         action_taken = True
                         if log_fn:
                             await log_fn(f"📢 Приєднано приватний спонсорський канал за посиланням")
+                        if on_sponsor_channel:
+                            try:
+                                await on_sponsor_channel(f"https://t.me/+{inv}")
+                            except Exception:
+                                pass
                         await asyncio.sleep(1.5)
                     except Exception:
                         pass

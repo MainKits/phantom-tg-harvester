@@ -309,6 +309,25 @@ async def _do_send_task(task_id: int):
                 except Exception as e_rm:
                     print(f"[Sender] Error removing dead target from file: {e_rm}")
 
+    async def _add_new_target(new_target: str, phone: str = ""):
+        """Add newly discovered sponsor channel/chat to targets list and targets file on disk."""
+        new_target = str(new_target).strip()
+        if not new_target:
+            return
+        prefix = f"[{phone}] " if phone else ""
+        async with targets_lock:
+            if new_target not in targets:
+                targets.append(new_target)
+                if targets_file:
+                    try:
+                        fpath = os.path.join(EXPORTS_DIR, targets_file.strip())
+                        if os.path.exists(fpath):
+                            with open(fpath, "a", encoding="utf-8") as f:
+                                f.write(f"\n{new_target}")
+                    except Exception as af_err:
+                        print(f"[Sender] Error appending new target to file: {af_err}")
+                await log_event("info", "sender", f"{prefix}➕ Додано спонсорський канал у базу розсилки: {new_target}")
+
     async def _send_for_account(account: dict, my_targets: list):
         """Worker function for one account sending to its distributed targets concurrently."""
         connected = False
@@ -415,8 +434,13 @@ async def _do_send_task(task_id: int):
                         # Auto-handle bot captchas and sponsor channel requirements after joining
                         try:
                             _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+                            async def _on_s(ch_target: str):
+                                await _add_new_target(ch_target, account["phone"])
+                                if ch_target not in my_targets:
+                                    my_targets.append(ch_target)
+
                             await asyncio.sleep(1.5)
-                            await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
+                            await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s)
                         except Exception:
                             pass
 
@@ -436,7 +460,12 @@ async def _do_send_task(task_id: int):
                                 # Attempt solving bot captcha / sponsor subscription in case write was gated
                                 try:
                                     _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
-                                    did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
+                                    async def _on_s2(ch_target: str):
+                                        await _add_new_target(ch_target, account["phone"])
+                                        if ch_target not in my_targets:
+                                            my_targets.append(ch_target)
+
+                                    did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s2)
                                     if did_solve:
                                         await asyncio.sleep(2)
                                         if media_path and os.path.exists(media_path):
@@ -567,8 +596,13 @@ async def _do_send_task(task_id: int):
                                     pass
                                 try:
                                     _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+                                    async def _on_s3(ch_target: str):
+                                        await _add_new_target(ch_target, account["phone"])
+                                        if ch_target not in my_targets:
+                                            my_targets.append(ch_target)
+
                                     await asyncio.sleep(1.5)
-                                    await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
+                                    await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s3)
                                 except Exception:
                                     pass
 
@@ -590,7 +624,12 @@ async def _do_send_task(task_id: int):
                                     if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
                                         try:
                                             _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
-                                            did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c)
+                                            async def _on_s4(ch_target: str):
+                                                await _add_new_target(ch_target, account["phone"])
+                                                if ch_target not in my_targets:
+                                                    my_targets.append(ch_target)
+
+                                            did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s4)
                                             if did_solve:
                                                 await asyncio.sleep(2)
                                                 if media_path and os.path.exists(media_path):
