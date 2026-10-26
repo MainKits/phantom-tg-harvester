@@ -5,8 +5,12 @@ Account Manager API — manage Telegram accounts, sessions, and proxies.
 import os
 import shutil
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
+from pydantic import BaseModel
+
+class BulkDeleteRequest(BaseModel):
+    account_ids: List[int]
 
 from ..database import get_db, log_event, backup_session_to_supabase, sync_to_supabase_async
 
@@ -215,54 +219,88 @@ async def check_account(account_id: int):
     return {"success": True, "status": status}
 
 
-@router.delete("/{account_id}")
-async def delete_account(account_id: int):
-    """Delete an account and its session file."""
-    db = await get_db()
-    
+async def _delete_single_account(db, account_id: int) -> bool:
     cursor = await db.execute("SELECT phone, session_file FROM accounts WHERE id = ?", (account_id,))
     row = await cursor.fetchone()
-    
     if not row:
-        await db.close()
-        raise HTTPException(status_code=404, detail="Account not found")
+        return False
         
+    phone, session_file = row[0], row[1]
+    
     # First, ensure the client is disconnected to release file lock
     from ..services.telegram_engine import telegram_engine
     client = telegram_engine.get_client(account_id)
     if client:
         try:
             await client.disconnect()
-        except:
+        except Exception:
             pass
         if account_id in telegram_engine._connected:
             telegram_engine._connected[account_id] = False
     
     # Delete session file if exists
-    if row[1]:
-        session_path = os.path.join(SESSIONS_DIR, row[1])
+    if session_file:
+        session_path = os.path.join(SESSIONS_DIR, session_file)
         if os.path.exists(session_path):
             try:
                 os.remove(session_path)
             except Exception as e:
-                # Log but do not fail completely
                 await log_event("warn", "accounts", f"Could not remove session file: {str(e)}")
     
     await db.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-    await db.commit()
 
     # Delete from Supabase cloud
     from ..database import get_supabase_client
     sb = get_supabase_client()
-    if sb and row[0]:
+    if sb and phone:
         try:
-            sb.table("accounts").delete().eq("phone", row[0]).execute()
+            sb.table("accounts").delete().eq("phone", phone).execute()
         except Exception:
             pass
 
-    await log_event("info", "accounts", f"Account {row[0]} deleted")
+    await log_event("info", "accounts", f"Account {phone or account_id} deleted")
+    return True
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_accounts(req: BulkDeleteRequest):
+    """Delete multiple accounts by their IDs."""
+    db = await get_db()
+    deleted_count = 0
+    for acc_id in req.account_ids:
+        if await _delete_single_account(db, acc_id):
+            deleted_count += 1
+    await db.commit()
     await db.close()
-    
+    return {"success": True, "deleted_count": deleted_count}
+
+
+@router.post("/delete-unauthorized")
+async def delete_unauthorized_accounts():
+    """Delete all inactive (unauthorized) accounts."""
+    db = await get_db()
+    cursor = await db.execute("SELECT id FROM accounts WHERE status = 'inactive'")
+    rows = await cursor.fetchall()
+    deleted_count = 0
+    for row in rows:
+        if await _delete_single_account(db, row[0]):
+            deleted_count += 1
+    await db.commit()
+    await db.close()
+    return {"success": True, "deleted_count": deleted_count}
+
+
+@router.delete("/{account_id}")
+async def delete_account(account_id: int):
+    """Delete an account and its session file."""
+    db = await get_db()
+    success = await _delete_single_account(db, account_id)
+    if not success:
+        await db.close()
+        raise HTTPException(status_code=404, detail="Account not found")
+        
+    await db.commit()
+    await db.close()
     return {"success": True}
 
 

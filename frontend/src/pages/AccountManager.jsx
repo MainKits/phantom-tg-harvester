@@ -21,6 +21,7 @@ export default function AccountManager() {
   const [apiHash, setApiHash] = useState(() => (typeof window !== 'undefined' ? localStorage.getItem('phantom_api_hash') || '' : ''))
   const [apiConfigured, setApiConfigured] = useState(() => (typeof window !== 'undefined' ? !!(localStorage.getItem('phantom_api_id') && localStorage.getItem('phantom_api_hash')) : false))
   const [checkingId, setCheckingId] = useState(null)
+  const [selectedIds, setSelectedIds] = useState([])
 
   // ── Join chat modal ──
   const [showJoinModal, setShowJoinModal] = useState(null)   // account
@@ -34,7 +35,9 @@ export default function AccountManager() {
       const res = await fetch(`${API}/api/accounts/`)
       if (res.ok) {
         const data = await res.json()
-        setAccounts(data.accounts || [])
+        const accs = data.accounts || []
+        setAccounts(accs)
+        setSelectedIds(prev => prev.filter(id => accs.some(a => a.id === id)))
       }
     } catch {}
     setLoading(false)
@@ -176,13 +179,69 @@ export default function AccountManager() {
     } catch { alert('Бекенд не запущено') }
   }
 
+  // ── Multi-select & Bulk delete ──
+  const unauthorizedAccounts = accounts.filter(a => a.status === 'inactive')
+  const unauthorizedCount = unauthorizedAccounts.length
+
+  const handleToggleSelect = (id) => {
+    setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  const handleToggleSelectAll = () => {
+    if (accounts.length > 0 && selectedIds.length === accounts.length) {
+      setSelectedIds([])
+    } else {
+      setSelectedIds(accounts.map(a => a.id))
+    }
+  }
+
+  const handleDeleteUnauthorized = async () => {
+    if (unauthorizedCount === 0) return
+    if (!confirm(`Ви дійсно хочете видалити всі неавторизовані акаунти (${unauthorizedCount} шт.)?`)) return
+    try {
+      const res = await fetch(`${API}/api/accounts/delete-unauthorized`, { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        alert(`✅ Видалено ${data.deleted_count} неавторизованих акаунтів`)
+        setSelectedIds([])
+        fetchAccounts()
+      } else {
+        const err = await res.json()
+        alert(err.detail || 'Помилка')
+      }
+    } catch { alert('Бекенд не запущено') }
+  }
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.length === 0) return
+    if (!confirm(`Ви дійсно хочете видалити вибрані акаунти (${selectedIds.length} шт.)?`)) return
+    try {
+      const res = await fetch(`${API}/api/accounts/bulk-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_ids: selectedIds }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        alert(`✅ Видалено ${data.deleted_count} акаунтів`)
+        setSelectedIds([])
+        fetchAccounts()
+      } else {
+        const err = await res.json()
+        alert(err.detail || 'Помилка')
+      }
+    } catch { alert('Бекенд не запущено') }
+  }
+
   // ── Delete ──
   const handleDelete = async (id) => {
     if (!confirm('Видалити акаунт?')) return
     try {
       const res = await fetch(`${API}/api/accounts/${id}`, { method: 'DELETE' })
-      if (res.ok) fetchAccounts()
-      else { const err = await res.json(); alert(err.detail || 'Помилка') }
+      if (res.ok) {
+        setSelectedIds(prev => prev.filter(x => x !== id))
+        fetchAccounts()
+      } else { const err = await res.json(); alert(err.detail || 'Помилка') }
     } catch { alert('Бекенд не запущено') }
   }
 
@@ -251,7 +310,12 @@ export default function AccountManager() {
     setJoinLoading(false)
   }
 
-  const statusLabel = (s) => ({ active: 'Active', 'spam-block': 'Spam-block', banned: 'Banned', inactive: 'Inactive' }[s] || s)
+  const statusLabel = (s) => ({
+    active: 'Active',
+    'spam-block': 'Spam-block',
+    banned: 'Banned',
+    inactive: 'Не авторизований'
+  }[s] || s)
 
   return (
     <>
@@ -301,65 +365,204 @@ export default function AccountManager() {
           </div>
         ) : (
           <div className="card">
+            {/* ── Action Toolbar: Counters & Bulk Deletion ── */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              borderBottom: '1px solid var(--border-color)',
+              background: 'rgba(255, 255, 255, 0.02)',
+              flexWrap: 'wrap',
+              gap: '10px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '13px', flexWrap: 'wrap' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>
+                  Всього: <strong style={{ color: 'var(--text-primary)' }}>{accounts.length}</strong>
+                </span>
+                {unauthorizedCount > 0 && (
+                  <span style={{
+                    background: 'rgba(255, 170, 0, 0.12)',
+                    color: '#ffaa00',
+                    padding: '2px 9px',
+                    borderRadius: '12px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    border: '1px solid rgba(255, 170, 0, 0.3)'
+                  }}>
+                    ⚠️ Не авторизованих: {unauthorizedCount}
+                  </span>
+                )}
+                {selectedIds.length > 0 && (
+                  <span style={{
+                    background: 'rgba(0, 240, 255, 0.12)',
+                    color: 'var(--neon-blue)',
+                    padding: '2px 9px',
+                    borderRadius: '12px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    border: '1px solid rgba(0, 240, 255, 0.3)'
+                  }}>
+                    Вибрано: {selectedIds.length}
+                  </span>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                {unauthorizedCount > 0 && (
+                  <button
+                    className="btn btn-sm"
+                    style={{
+                      background: 'rgba(255, 170, 0, 0.15)',
+                      color: '#ffaa00',
+                      border: '1px solid rgba(255, 170, 0, 0.4)',
+                      fontWeight: 600,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                    onClick={handleDeleteUnauthorized}
+                    title="Видалити всі неавторизовані акаунти одною кнопкою"
+                  >
+                    <Trash2 size={13} />
+                    Видалити неавторизовані ({unauthorizedCount})
+                  </button>
+                )}
+
+                {selectedIds.length > 0 && (
+                  <>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                      onClick={handleDeleteSelected}
+                      title="Видалити всі вибрані акаунти"
+                    >
+                      <Trash2 size={13} />
+                      Видалити вибрані ({selectedIds.length})
+                    </button>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setSelectedIds([])}
+                      title="Зняти виділення"
+                    >
+                      Скинути вибір
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
             <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
+                    <th style={{ width: '40px', textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        checked={accounts.length > 0 && selectedIds.length === accounts.length}
+                        onChange={handleToggleSelectAll}
+                        title="Вибрати всі / Зняти всі"
+                        style={{ cursor: 'pointer', width: '15px', height: '15px', accentColor: 'var(--neon-blue)' }}
+                      />
+                    </th>
                     <th>#</th><th>Телефон</th><th>Статус</th><th>Проксі</th>
                     <th>Відправлено</th><th>Інвайтів</th><th>Дії</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {accounts.map(acc => (
-                    <tr key={acc.id}>
-                      <td>{acc.id}</td>
-                      <td style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{acc.phone}</td>
-                      <td>
-                        <span className={`badge ${acc.status}`}>
-                          <span className="badge-dot"></span>{statusLabel(acc.status)}
-                        </span>
-                      </td>
-                      <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '12px' }}>
-                        {acc.proxy_host ? `${acc.proxy_type}://${acc.proxy_host}:${acc.proxy_port}` : '—'}
-                      </td>
-                      <td>{acc.messages_sent_today || 0}/35</td>
-                      <td>{acc.invites_sent_today || 0}/15</td>
-                      <td>
-                        <div className="btn-group">
-                          {/* Authorize (inactive accounts) */}
-                          {acc.status === 'inactive' && (
-                            <button className="btn btn-success btn-sm" title="Авторизувати"
-                              onClick={() => { setShowAuthModal(acc); setAuthStep('phone'); setAuthCode('') }}>
-                              <LogIn size={13} />
-                            </button>
+                  {accounts.map(acc => {
+                    const isSelected = selectedIds.includes(acc.id)
+                    const isInactive = acc.status === 'inactive'
+                    return (
+                      <tr
+                        key={acc.id}
+                        style={{
+                          background: isSelected
+                            ? 'rgba(0, 240, 255, 0.07)'
+                            : isInactive
+                            ? 'rgba(255, 170, 0, 0.03)'
+                            : undefined,
+                          borderLeft: isInactive
+                            ? '3px solid #ffaa00'
+                            : isSelected
+                            ? '3px solid var(--neon-blue)'
+                            : '3px solid transparent'
+                        }}
+                      >
+                        <td style={{ textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleToggleSelect(acc.id)}
+                            style={{ cursor: 'pointer', width: '15px', height: '15px', accentColor: 'var(--neon-blue)' }}
+                          />
+                        </td>
+                        <td>{acc.id}</td>
+                        <td style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{acc.phone}</td>
+                        <td>
+                          {isInactive ? (
+                            <span
+                              className="badge inactive"
+                              style={{
+                                background: 'rgba(255, 170, 0, 0.15)',
+                                color: '#ffaa00',
+                                border: '1px solid rgba(255, 170, 0, 0.35)',
+                                fontWeight: 600,
+                                whiteSpace: 'nowrap'
+                              }}
+                              title="Акаунт не авторизований. Натисніть кнопку входу праворуч або видаліть."
+                            >
+                              <span className="badge-dot" style={{ background: '#ffaa00' }}></span>
+                              ⚠️ Не авторизований
+                            </span>
+                          ) : (
+                            <span className={`badge ${acc.status}`}>
+                              <span className="badge-dot"></span>{statusLabel(acc.status)}
+                            </span>
                           )}
-                          {/* Check status */}
-                          {acc.status !== 'inactive' && (
-                            <button className="btn btn-primary btn-sm" title="Перевірити статус"
-                              disabled={checkingId === acc.id}
-                              onClick={() => handleCheck(acc)}>
-                              <RefreshCw size={13} className={checkingId === acc.id ? 'spin' : ''} />
+                        </td>
+                        <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '12px' }}>
+                          {acc.proxy_host ? `${acc.proxy_type}://${acc.proxy_host}:${acc.proxy_port}` : '—'}
+                        </td>
+                        <td>{acc.messages_sent_today || 0}/35</td>
+                        <td>{acc.invites_sent_today || 0}/15</td>
+                        <td>
+                          <div className="btn-group">
+                            {/* Authorize (inactive accounts) */}
+                            {acc.status === 'inactive' && (
+                              <button className="btn btn-success btn-sm" title="Авторизувати"
+                                onClick={() => { setShowAuthModal(acc); setAuthStep('phone'); setAuthCode('') }}>
+                                <LogIn size={13} />
+                              </button>
+                            )}
+                            {/* Check status */}
+                            {acc.status !== 'inactive' && (
+                              <button className="btn btn-primary btn-sm" title="Перевірити статус"
+                                disabled={checkingId === acc.id}
+                                onClick={() => handleCheck(acc)}>
+                                <RefreshCw size={13} className={checkingId === acc.id ? 'spin' : ''} />
+                              </button>
+                            )}
+                            {/* Join chat */}
+                            {acc.status === 'active' && (
+                              <button className="btn btn-secondary btn-sm" title="Вступити в чат/канал"
+                                onClick={() => { setShowJoinModal(acc); setJoinLink(''); setJoinResult(null) }}>
+                                🔗
+                              </button>
+                            )}
+                            {/* Proxy */}
+                            <button className="btn btn-secondary btn-sm" title="Проксі" onClick={() => openProxyModal(acc)}>
+                              <Shield size={13} />
                             </button>
-                          )}
-                          {/* Join chat */}
-                          {acc.status === 'active' && (
-                            <button className="btn btn-secondary btn-sm" title="Вступити в чат/канал"
-                              onClick={() => { setShowJoinModal(acc); setJoinLink(''); setJoinResult(null) }}>
-                              🔗
+                            {/* Delete */}
+                            <button className="btn btn-danger btn-sm" title="Видалити" onClick={() => handleDelete(acc.id)}>
+                              <Trash2 size={13} />
                             </button>
-                          )}
-                          {/* Proxy */}
-                          <button className="btn btn-secondary btn-sm" title="Проксі" onClick={() => openProxyModal(acc)}>
-                            <Shield size={13} />
-                          </button>
-                          {/* Delete */}
-                          <button className="btn btn-danger btn-sm" title="Видалити" onClick={() => handleDelete(acc.id)}>
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
