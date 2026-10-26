@@ -6,6 +6,7 @@ import os
 import json
 import asyncio
 import random
+import time
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
 from ..database import get_db, log_event
@@ -206,7 +207,7 @@ async def _check_is_real_spamblock(client, account: dict) -> bool:
 
 
 async def _do_send_task(task_id: int):
-    """Background worker: sends messages in parallel across multiple accounts with target partitioning."""
+    """Background worker: sends messages in parallel across multiple accounts with dynamic shared queue."""
     from ..services.telegram_engine import telegram_engine
     from telethon.tl.functions.channels import JoinChannelRequest
     from telethon.errors import (
@@ -283,31 +284,18 @@ async def _do_send_task(task_id: int):
                 await db_up.close()
 
     targets_lock = asyncio.Lock()
+    target_retry_counts = {}
 
     async def _remove_dead_target(target_val: str, reason: str, phone: str = ""):
-        """Permanently remove unreachable/inactive/invalid target from in-memory queue and targets file."""
+        """Mark target as skipped for this task run without touching user's target file on disk."""
         prefix = f"[{phone}] " if phone else ""
-        await log_event("warn", "sender", f"{prefix}🗑️ Чат видалено з бази: {target_val} ({reason})")
+        await log_event("warn", "sender", f"{prefix}⚠️ Пропуск чату: {target_val} ({reason})")
         async with targets_lock:
-            # Remove from in-memory targets list
             try:
                 while target_val in targets:
                     targets.remove(target_val)
             except Exception:
                 pass
-
-            # Remove from targets_file on disk
-            if targets_file:
-                try:
-                    fpath = os.path.join(EXPORTS_DIR, targets_file.strip())
-                    if os.path.exists(fpath):
-                        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                            lines = [l.strip() for l in f if l.strip()]
-                        new_lines = [l for l in lines if l != target_val and l != target_val.strip()]
-                        with open(fpath, "w", encoding="utf-8") as f:
-                            f.write("\n".join(new_lines) + ("\n" if new_lines else ""))
-                except Exception as e_rm:
-                    print(f"[Sender] Error removing dead target from file: {e_rm}")
 
     async def _add_new_target(new_target: str, phone: str = ""):
         """Add newly discovered sponsor channel/chat to targets list and targets file on disk."""
@@ -328,8 +316,125 @@ async def _do_send_task(task_id: int):
                         print(f"[Sender] Error appending new target to file: {af_err}")
                 await log_event("info", "sender", f"{prefix}➕ Додано спонсорський канал у базу розсилки: {new_target}")
 
-    async def _send_for_account(account: dict, my_targets: list):
-        """Worker function for one account sending to its distributed targets concurrently."""
+    async def _resolve_target_entity(client, target_str: str):
+        """
+        Cleans and resolves any Telegram target into an entity.
+        Handles invite links, URLs with trailing slashes, post links, numeric IDs.
+        Returns: (entity, is_broadcast, is_post_link, post_id)
+        """
+        raw = str(target_str).strip()
+        for ch in ["\u200b", "\ufeff", "\u00a0", "\r", "\n"]:
+            raw = raw.replace(ch, "")
+        raw = raw.strip()
+
+        # Check for invite links (t.me/+, joinchat/, /+)
+        if "t.me/+" in raw or "joinchat/" in raw or "/+" in raw:
+            if "t.me/+" in raw:
+                invite_hash = raw.split("t.me/+")[1]
+            elif "joinchat/" in raw:
+                invite_hash = raw.split("joinchat/")[1]
+            else:
+                invite_hash = raw.split("/+")[1]
+            invite_hash = invite_hash.split("/")[0].split("?")[0].strip()
+
+            from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+            try:
+                imp = await client(ImportChatInviteRequest(invite_hash))
+                await asyncio.sleep(1.5)
+                if hasattr(imp, 'chats') and imp.chats:
+                    ent = imp.chats[0]
+                    return ent, getattr(ent, 'broadcast', False), False, None
+            except UserAlreadyParticipantError:
+                try:
+                    chk = await client(CheckChatInviteRequest(invite_hash))
+                    if hasattr(chk, 'chat'):
+                        ent = chk.chat
+                        return ent, getattr(ent, 'broadcast', False), False, None
+                except Exception:
+                    pass
+            except InviteRequestSentError:
+                raise
+            except (InviteHashInvalidError, InviteHashExpiredError):
+                raise
+
+        # Clean URL prefixes
+        clean = raw
+        if "telegram.me/" in clean:
+            clean = clean.replace("telegram.me/", "t.me/")
+        if "https://" in clean:
+            clean = clean.replace("https://", "")
+        if "http://" in clean:
+            clean = clean.replace("http://", "")
+        if "tg://resolve?domain=" in clean:
+            clean = clean.replace("tg://resolve?domain=", "")
+
+        # Check for post link: e.g. t.me/channel/123 or channel:123
+        is_post_link = False
+        post_id = None
+        if "t.me/" in clean and "/" in clean.split("t.me/")[1]:
+            parts = clean.split("t.me/")[1].split("/")
+            if len(parts) >= 2 and parts[1].split("?")[0].isdigit():
+                clean = parts[0]
+                is_post_link = True
+                post_id = int(parts[1].split("?")[0])
+        elif ":" in clean and clean.rsplit(":", 1)[1].isdigit():
+            parts = clean.rsplit(":", 1)
+            clean = parts[0]
+            is_post_link = True
+            post_id = int(parts[1])
+
+        # Strip remaining path and query
+        if "t.me/" in clean:
+            clean = clean.split("t.me/")[1]
+        clean = clean.split("/")[0].split("?")[0].strip()
+        clean = clean.lstrip("@")
+
+        if clean.startswith("-") and clean[1:].isdigit():
+            target_param = int(clean)
+        elif clean.isdigit():
+            target_param = int(clean)
+        else:
+            target_param = clean
+
+        entity = await client.get_entity(target_param)
+        is_broadcast = getattr(entity, 'broadcast', False)
+        return entity, is_broadcast, is_post_link, post_id
+
+    async def _ensure_joined_channel(client, entity, log_fn=None):
+        """
+        Ensure client is in the channel/group if not already joined.
+        Skips JoinChannelRequest if left is False (avoids join FloodWait).
+        """
+        is_left = getattr(entity, 'left', None)
+        if is_left is False:
+            return True
+
+        from telethon.tl.functions.channels import JoinChannelRequest
+        try:
+            await client(JoinChannelRequest(entity))
+            await asyncio.sleep(1.5)
+            return True
+        except UserAlreadyParticipantError:
+            return True
+        except FloodWaitError as fwe:
+            if fwe.seconds <= 30:
+                if log_fn:
+                    await log_fn(f"Join FloodWait {fwe.seconds}s — очікуємо...")
+                await asyncio.sleep(fwe.seconds + 2)
+                try:
+                    await client(JoinChannelRequest(entity))
+                    return True
+                except Exception:
+                    pass
+            raise fwe
+        except Exception as je:
+            j_str = str(je).lower()
+            if "channelstoomuch" in j_str:
+                raise je
+            return False
+
+    async def _send_for_account(account: dict, target_queue: asyncio.Queue, all_targets_ref: list, accounts_count: int):
+        """Worker function for one account sending to shared target queue."""
         connected = False
         try:
             connected = await telegram_engine.connect_account(account)
@@ -344,10 +449,19 @@ async def _do_send_task(task_id: int):
 
         sent_this_account = 0
         consecutive_flood_waits = 0
-        for target in my_targets:
-            if task_id not in _active_task_loops:
-                break
-            if sent_this_account >= per_account:
+        join_cooldown_until = 0
+
+        _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
+        async def _on_s(ch_target: str):
+            await _add_new_target(ch_target, account["phone"])
+            if ch_target not in all_targets_ref:
+                all_targets_ref.append(ch_target)
+                await target_queue.put(ch_target)
+
+        while task_id in _active_task_loops and not target_queue.empty() and sent_this_account < per_account:
+            try:
+                target = target_queue.get_nowait()
+            except asyncio.QueueEmpty:
                 break
 
             target_str = str(target).strip()
@@ -358,305 +472,143 @@ async def _do_send_task(task_id: int):
                 # 40s timeout so no single chat can freeze the worker
                 async with asyncio.timeout(40.0):
                     msg = parse_spintax(message_text) if (spintax_enabled and message_text) else message_text
+                    entity, is_broadcast, is_post_link, post_id = await _resolve_target_entity(client, target_str)
 
                     if send_type == "users":
-                        clean_u = target_str
-                        if "t.me/" in clean_u:
-                            clean_u = clean_u.split("t.me/")[-1].split("/")[0].split("?")[0]
-                        clean_u = clean_u.lstrip("@")
-                        if clean_u.isdigit():
-                            clean_u = int(clean_u)
-                        entity = await client.get_entity(clean_u)
                         if media_path and os.path.exists(media_path):
                             try:
                                 await client.send_message(entity, msg, file=media_path)
                             except Exception as m_err:
                                 m_str = str(m_err).lower()
-                                if "media" in m_str or "photo" in m_str or "file" in m_str:
+                                if "media" in m_str or "photo" in m_str or "file" in m_str or "rights" in m_str:
                                     await client.send_message(entity, msg)
                                 else:
                                     raise m_err
                         else:
                             await client.send_message(entity, msg)
 
-                    elif send_type == "chats":
-                        clean_c = target_str
-                        entity = None
-                        if "t.me/+" in clean_c or "joinchat/" in clean_c or "/+" in clean_c:
-                            if "t.me/+" in clean_c:
-                                invite_hash = clean_c.split("t.me/+")[1]
-                            elif "joinchat/" in clean_c:
-                                invite_hash = clean_c.split("joinchat/")[1]
-                            else:
-                                invite_hash = clean_c.split("/+")[1]
-                            invite_hash = invite_hash.split("/")[0].split("?")[0].strip()
-
-                            from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
-                            from telethon.tl.types import ChatInviteAlready
-
-                            try:
-                                imp = await client(ImportChatInviteRequest(invite_hash))
-                                await asyncio.sleep(2)
-                                if hasattr(imp, 'chats') and imp.chats:
-                                    entity = imp.chats[0]
-                            except UserAlreadyParticipantError:
-                                try:
-                                    chk = await client(CheckChatInviteRequest(invite_hash))
-                                    if hasattr(chk, 'chat'):
-                                        entity = chk.chat
-                                except Exception:
-                                    pass
-                            except InviteRequestSentError:
-                                await _increment_stats(task_id, success=False)
-                                await log_event("info", "sender", f"[{account['phone']}] → {target_str}: надіслано запит на вступ (очікує схвалення адміном каналу)")
-                                continue
-                            except (InviteHashInvalidError, InviteHashExpiredError) as inv_err:
-                                raise inv_err
-
-                            if not entity:
-                                try:
-                                    entity = await client.get_entity(clean_c)
-                                except Exception:
-                                    pass
-                        else:
-                            if "t.me/" in clean_c:
-                                clean_c = clean_c.split("t.me/")[-1].split("/")[0].split("?")[0]
-                            clean_c = clean_c.lstrip("@")
-                            if clean_c.isdigit():
-                                clean_c = int(clean_c)
-                            entity = await client.get_entity(clean_c)
-                            try:
-                                await client(JoinChannelRequest(entity))
-                                await asyncio.sleep(2)
-                            except Exception:
-                                pass
-
-                        # Auto-handle bot captchas and sponsor channel requirements after joining
-                        try:
-                            _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
-                            async def _on_s(ch_target: str):
-                                await _add_new_target(ch_target, account["phone"])
-                                if ch_target not in my_targets:
-                                    my_targets.append(ch_target)
-
-                            await asyncio.sleep(1.5)
-                            await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s)
-                        except Exception:
-                            pass
-
-                        try:
-                            if media_path and os.path.exists(media_path):
-                                try:
-                                    await client.send_message(entity, msg, file=media_path)
-                                except Exception as m_err:
-                                    # If chat disallows media/photos, fallback to sending plain text
-                                    await client.send_message(entity, msg)
-                            else:
-                                await client.send_message(entity, msg)
-                        except Exception as send_err:
-                            err_str = str(send_err)
-                            handled_write_error = False
-                            if "ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str:
-                                # Attempt solving bot captcha / sponsor subscription in case write was gated
-                                try:
-                                    _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
-                                    async def _on_s2(ch_target: str):
-                                        await _add_new_target(ch_target, account["phone"])
-                                        if ch_target not in my_targets:
-                                            my_targets.append(ch_target)
-
-                                    did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s2)
-                                    if did_solve:
-                                        await asyncio.sleep(2)
-                                        if media_path and os.path.exists(media_path):
-                                            try:
-                                                await client.send_message(entity, msg, file=media_path)
-                                                handled_write_error = True
-                                            except Exception:
-                                                await client.send_message(entity, msg)
-                                                handled_write_error = True
-                                        else:
-                                            await client.send_message(entity, msg)
-                                            handled_write_error = True
-                                except Exception:
-                                    pass
-
-                            if not handled_write_error:
-                                # ONLY try comments fallback if target is an actual broadcast channel
-                                is_broadcast = getattr(entity, 'broadcast', False)
-                                if is_broadcast and ("ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str):
-                                    post_id = 1
-                                    async for m in client.iter_messages(entity, limit=1):
-                                        post_id = m.id
-                                        break
-                                    try:
-                                        await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                    except Exception:
-                                        raise send_err
-                                else:
-                                    raise send_err
-
                     elif send_type == "comments":
-                        clean_t = target_str
-                        if "t.me/" in clean_t:
-                            path_parts = clean_t.split("t.me/")[1].split("/")
-                            channel = path_parts[0]
-                            post_id = int(path_parts[1]) if len(path_parts) > 1 and path_parts[1].isdigit() else 1
-                        elif ":" in clean_t:
-                            parts = clean_t.rsplit(":", 1)
-                            channel = parts[0]
-                            post_id = int(parts[1]) if parts[1].isdigit() else 1
-                        else:
-                            channel = clean_t
-                            entity = await client.get_entity(channel)
+                        if not is_post_link or not post_id:
                             post_id = 1
                             async for m in client.iter_messages(entity, limit=1):
                                 post_id = m.id
                                 break
                         try:
-                            await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
+                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
                         except Exception as c_err:
                             c_str = str(c_err).lower()
                             if "msg_id_invalid" in c_str or "chatwriteforbidden" in c_str or "chatadminrequired" in c_str or "channelprivate" in c_str:
                                 raise Exception(f"PERM_NO_WRITE: коментарі недоступні або вимкнені: {c_err}")
                             raise c_err
 
-                    elif send_type == "combo":
-                        clean_t = target_str
-                        is_post_link = (("t.me/" in clean_t and "/" in clean_t.split("t.me/")[1] and clean_t.split("t.me/")[1].split("/")[1].isdigit()) or (":" in clean_t and clean_t.rsplit(":", 1)[1].isdigit()))
-                        
-                        if is_post_link:
-                            if "t.me/" in clean_t:
-                                path_parts = clean_t.split("t.me/")[1].split("/")
-                                channel = path_parts[0]
-                                post_id = int(path_parts[1])
-                            else:
-                                parts = clean_t.rsplit(":", 1)
-                                channel = parts[0]
-                                post_id = int(parts[1])
+                    else:  # "chats" or "combo"
+                        if is_post_link and post_id:
+                            # Explicit post link: comment directly
                             try:
-                                await telegram_engine.post_comment(client, channel, post_id, msg, file=media_path)
+                                await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
                             except Exception as c_err:
                                 c_str = str(c_err).lower()
                                 if "msg_id_invalid" in c_str or "chatwriteforbidden" in c_str or "chatadminrequired" in c_str or "channelprivate" in c_str:
                                     raise Exception(f"PERM_NO_WRITE: коментарі недоступні або вимкнені: {c_err}")
                                 raise c_err
+                        elif is_broadcast:
+                            # Broadcast channel without post link: try commenting on latest post
+                            post_id = 1
+                            async for m in client.iter_messages(entity, limit=1):
+                                post_id = m.id
+                                break
+                            try:
+                                await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                            except Exception as comm_err:
+                                raise Exception(f"PERM_NO_WRITE: канал закритий (немає доступу для запису або коментарів: {comm_err})")
                         else:
-                            entity = None
-                            if "t.me/+" in clean_t or "joinchat/" in clean_t or "/+" in clean_t:
-                                if "t.me/+" in clean_t:
-                                    invite_hash = clean_t.split("t.me/+")[1]
-                                elif "joinchat/" in clean_t:
-                                    invite_hash = clean_t.split("joinchat/")[1]
+                            # Group / Supergroup
+                            needs_join = getattr(entity, 'left', None) is not False
+                            if needs_join and time.time() < join_cooldown_until:
+                                # Requeue for another account without join cooldown
+                                retries = target_retry_counts.get(target_str, 0)
+                                if retries < accounts_count:
+                                    target_retry_counts[target_str] = retries + 1
+                                    await target_queue.put(target_str)
+                                    await asyncio.sleep(0.5)
+                                    continue
+
+                            # Ensure joined
+                            try:
+                                await _ensure_joined_channel(client, entity, log_fn=_log_c)
+                            except FloodWaitError as j_fwe:
+                                join_cooldown_until = time.time() + j_fwe.seconds
+                                await log_event("warn", "sender", f"[{account['phone']}] Ліміт Telegram на вступ у нові канали (FloodWait {j_fwe.seconds}s). Акаунт переходить до чатів, де вже є учасником.")
+                                retries = target_retry_counts.get(target_str, 0)
+                                if retries < accounts_count:
+                                    target_retry_counts[target_str] = retries + 1
+                                    await target_queue.put(target_str)
+                                    continue
                                 else:
-                                    invite_hash = clean_t.split("/+")[1]
-                                invite_hash = invite_hash.split("/")[0].split("?")[0].strip()
+                                    raise j_fwe
+                            except Exception as j_err:
+                                if "channelstoomuch" in str(j_err).lower():
+                                    await log_event("warn", "sender", f"[{account['phone']}] Досягнуто ліміт 500 груп (ChannelsTooMuchError).")
+                                    retries = target_retry_counts.get(target_str, 0)
+                                    if retries < accounts_count:
+                                        target_retry_counts[target_str] = retries + 1
+                                        await target_queue.put(target_str)
+                                        continue
 
-                                from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
-                                from telethon.tl.types import ChatInviteAlready
+                            # Auto-handle bot captchas and sponsor channel requirements after joining
+                            try:
+                                await asyncio.sleep(1.5)
+                                await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s)
+                            except Exception:
+                                pass
 
-                                try:
-                                    imp = await client(ImportChatInviteRequest(invite_hash))
-                                    await asyncio.sleep(2)
-                                    if hasattr(imp, 'chats') and imp.chats:
-                                        entity = imp.chats[0]
-                                except UserAlreadyParticipantError:
+                            # Send message
+                            try:
+                                if media_path and os.path.exists(media_path):
                                     try:
-                                        chk = await client(CheckChatInviteRequest(invite_hash))
-                                        if hasattr(chk, 'chat'):
-                                            entity = chk.chat
+                                        await client.send_message(entity, msg, file=media_path)
+                                    except Exception as m_err:
+                                        m_str = str(m_err).lower()
+                                        if "media" in m_str or "photo" in m_str or "file" in m_str or "rights" in m_str or "restrict" in m_str:
+                                            await client.send_message(entity, msg)
+                                        else:
+                                            raise m_err
+                                else:
+                                    await client.send_message(entity, msg)
+                            except Exception as send_err:
+                                err_str = str(send_err)
+                                handled = False
+                                if "ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str:
+                                    try:
+                                        did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s)
+                                        if did_solve:
+                                            await asyncio.sleep(2)
+                                            if media_path and os.path.exists(media_path):
+                                                try:
+                                                    await client.send_message(entity, msg, file=media_path)
+                                                    handled = True
+                                                except Exception:
+                                                    await client.send_message(entity, msg)
+                                                    handled = True
+                                            else:
+                                                await client.send_message(entity, msg)
+                                                handled = True
                                     except Exception:
                                         pass
-                                except InviteRequestSentError:
-                                    await _increment_stats(task_id, success=False)
-                                    await log_event("info", "sender", f"[{account['phone']}] → {target_str}: надіслано запит на вступ (очікує схвалення адміном каналу)")
-                                    continue
-                                except (InviteHashInvalidError, InviteHashExpiredError) as inv_err:
-                                    raise inv_err
 
-                            if not entity:
-                                from telethon.tl.types import Channel
-                                entity = await client.get_entity(clean_t)
-
-                            from telethon.tl.types import Channel
-                            if isinstance(entity, Channel) and entity.broadcast:
-                                post_id = 1
-                                async for m in client.iter_messages(entity, limit=1):
-                                    post_id = m.id
-                                    break
-                                try:
-                                    await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                except Exception as comm_err:
-                                    raise Exception(f"PERM_NO_WRITE: канал закритий (немає доступу для запису або коментарів: {comm_err})")
-                            else:
-                                try:
-                                    await client(JoinChannelRequest(entity))
-                                    await asyncio.sleep(2)
-                                except Exception:
-                                    pass
-                                try:
-                                    _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
-                                    async def _on_s3(ch_target: str):
-                                        await _add_new_target(ch_target, account["phone"])
-                                        if ch_target not in my_targets:
-                                            my_targets.append(ch_target)
-
-                                    await asyncio.sleep(1.5)
-                                    await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s3)
-                                except Exception:
-                                    pass
-
-                                try:
-                                    if media_path and os.path.exists(media_path):
+                                if not handled:
+                                    if send_type == "combo" and is_broadcast:
+                                        post_id = 1
+                                        async for m in client.iter_messages(entity, limit=1):
+                                            post_id = m.id
+                                            break
                                         try:
-                                            await client.send_message(entity, msg, file=media_path)
-                                        except Exception as m_err:
-                                            m_str = str(m_err).lower()
-                                            if "media" in m_str or "photo" in m_str or "file" in m_str:
-                                                await client.send_message(entity, msg)
-                                            else:
-                                                raise m_err
-                                    else:
-                                        await client.send_message(entity, msg)
-                                except Exception as send_err:
-                                    err_str = str(send_err)
-                                    handled_write_error = False
-                                    if "ChatWriteForbidden" in err_str or "ChannelPrivate" in err_str or "ChatAdminRequired" in err_str:
-                                        try:
-                                            _log_c = lambda txt: log_event("info", "sender", f"[{account['phone']}] {txt}")
-                                            async def _on_s4(ch_target: str):
-                                                await _add_new_target(ch_target, account["phone"])
-                                                if ch_target not in my_targets:
-                                                    my_targets.append(ch_target)
-
-                                            did_solve = await telegram_engine.handle_captcha_and_subscriptions(client, entity, log_fn=_log_c, on_sponsor_channel=_on_s4)
-                                            if did_solve:
-                                                await asyncio.sleep(2)
-                                                if media_path and os.path.exists(media_path):
-                                                    try:
-                                                        await client.send_message(entity, msg, file=media_path)
-                                                        handled_write_error = True
-                                                    except Exception:
-                                                        pass
-                                                else:
-                                                    await client.send_message(entity, msg)
-                                                    handled_write_error = True
+                                            await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
+                                            handled = True
                                         except Exception:
-                                            pass
-
-                                    if not handled_write_error:
-                                        is_broadcast = getattr(entity, 'broadcast', False)
-                                        if is_broadcast and ("ChatWriteForbidden" in err_str or "ChatAdminRequired" in err_str):
-                                            post_id = 1
-                                            async for m in client.iter_messages(entity, limit=1):
-                                                post_id = m.id
-                                                break
-                                            try:
-                                                await telegram_engine.post_comment(client, entity, post_id, msg, file=media_path)
-                                            except Exception:
-                                                raise send_err
-                                        else:
                                             raise send_err
+                                    else:
+                                        raise send_err
 
                 sent_this_account += 1
                 consecutive_flood_waits = 0
@@ -666,38 +618,41 @@ async def _do_send_task(task_id: int):
                 delay = random.randint(delay_min, delay_max)
                 await asyncio.sleep(delay)
 
+            except InviteRequestSentError:
+                await _increment_stats(task_id, success=False)
+                await log_event("info", "sender", f"[{account['phone']}] → {target_str}: надіслано запит на вступ (очікує схвалення адміном)")
+                await asyncio.sleep(1)
+                continue
+
             except SlowModeWaitError as e:
                 await _increment_stats(task_id, success=False)
-                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: увімкнено SlowMode ({e.seconds}s), пропускаємо цей канал")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: увімкнено SlowMode ({e.seconds}s), пропуск")
                 await asyncio.sleep(2)
                 continue
 
             except FloodWaitError as e:
                 await _increment_stats(task_id, success=False)
-                # FloodWait is a temporary cooldown on a specific action/channel, NOT necessarily an account-wide block!
                 if e.seconds <= 60:
                     await log_event("info", "sender", f"[{account['phone']}] FloodWait {e.seconds}s — очікуємо...")
                     await asyncio.sleep(e.seconds + 2)
                     continue
                 else:
                     consecutive_flood_waits += 1
-                    # If FloodWait is triggered only on this channel/action, don't kill the account for all other channels!
                     if consecutive_flood_waits >= 2:
-                        await log_event("warn", "sender", f"[{account['phone']}] Повторний FloodWait {e.seconds}s на кількох каналах поспіль (загальний ліміт дій Telegram для акаунта). Пропускаємо цей акаунт для поточної задачі.")
+                        await log_event("warn", "sender", f"[{account['phone']}] Повторний FloodWait {e.seconds}s. Пропускаємо цей акаунт для поточної задачі.")
                         break
                     else:
-                        await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: FloodWait {e.seconds}s (ліміт у цьому каналі/дії). Пропускаємо цей канал і переходимо до наступних.")
+                        await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: FloodWait {e.seconds}s (ліміт дій). Пропускаємо цей канал.")
                         await asyncio.sleep(3)
                         continue
 
             except PeerFloodError:
-                # PeerFlood: check with official @SpamBot before claiming spam-block!
                 is_real = await _check_is_real_spamblock(client, account)
                 if is_real:
                     await log_event("warn", "sender", f"[{account['phone']}] PeerFlood — підтверджено спам-блок через @SpamBot")
                     await _mark_spam_block(account["id"], "Підтверджено @SpamBot")
                 else:
-                    await log_event("warn", "sender", f"[{account['phone']}] PeerFlood (тимчасовий ліміт дій) — в @SpamBot чисто. Зупиняємо акаунт на поточну задачу, статус залишається Active.")
+                    await log_event("warn", "sender", f"[{account['phone']}] PeerFlood (тимчасовий ліміт дій) — в @SpamBot чисто. Зупиняємо цей акаунт на поточну задачу, статус Active.")
                 break
 
             except (UserDeactivatedBanError, PhoneNumberBannedError) as e:
@@ -707,56 +662,49 @@ async def _do_send_task(task_id: int):
 
             except (UsernameNotOccupiedError, UsernameInvalidError) as e:
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Недійсний або неіснуючий username", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: юзернейм або чат не знайдено в Telegram ({e}), пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except (InviteHashInvalidError, InviteHashExpiredError) as e:
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Посилання на чат недійсне або прострочене", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: посилання на чат недійсне або прострочене, пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except ChannelPrivateError:
-                # Private channel: account might not have joined yet or needs an invite link. DO NOT delete from base!
                 await _increment_stats(task_id, success=False)
-                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: приватний канал (акаунт не є учасником або потрібне посилання-запрошення), пропуск без видалення")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: приватний канал (потрібне посилання-запрошення), пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except ChannelInvalidError:
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Канал не існує або видалений", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: канал або чат недоступний для цього акаунта, пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except UserBannedInChannelError:
-                # Account is restricted/banned in this group, but the group itself is valid! DO NOT delete from base.
                 await _increment_stats(task_id, success=False)
-                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: акаунт обмежено/заблоковано в цьому чаті, пропуск")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: акаунт обмежено в цьому чаті, пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except InputUserDeactivatedError:
                 await _increment_stats(task_id, success=False)
-                await _remove_dead_target(target_str, "Акаунт користувача видалено", account["phone"])
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: акаунт користувача видалено, пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except (ChatWriteForbiddenError, ChatAdminRequiredError) as e:
-                # Chat is valid, but this account has no permission (captcha, slowmode, media restriction, or admin only). DO NOT delete from base!
                 await _increment_stats(task_id, success=False)
-                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: немає прав на запис (обмеження в чаті, капча або тільки адміни), пропуск")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: немає прав на запис (обмеження в чаті або тільки адміни), пропуск")
                 await asyncio.sleep(1)
                 continue
 
             except ValueError as e:
-                err_lower = str(e).lower()
                 await _increment_stats(task_id, success=False)
-                if "cannot find any entity" in err_lower or "no user has" in err_lower:
-                    await _remove_dead_target(target_str, "Чат або юзернейм не знайдено в Telegram", account["phone"])
-                else:
-                    await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: {str(e)[:120]}")
+                await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: не вдалося знайти сутність ({str(e)[:100]}), пропуск")
                 await asyncio.sleep(1)
                 continue
 
@@ -769,32 +717,34 @@ async def _do_send_task(task_id: int):
             except TimeoutError:
                 await _increment_stats(task_id, success=False)
                 await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: таймаут (>40s), пропуск")
+                await asyncio.sleep(1)
+                continue
 
             except Exception as e:
                 err_text = str(e).lower()
                 if "cannot find any entity" in err_text:
                     await _increment_stats(task_id, success=False)
-                    await _remove_dead_target(target_str, "Чат не знайдено", account["phone"])
+                    await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: чат не знайдено для цього акаунта, пропуск")
                     await asyncio.sleep(1)
                     continue
 
-                # Check for real account-level ban
                 if "user_deactivated" in err_text or "phone_number_banned" in err_text:
                     await log_event("error", "sender", f"[{account['phone']}] Заблоковано: {e}")
                     await _mark_banned(account["id"], account["phone"], str(e))
                     break
 
-                # Only if Telegram explicitly reports mutual contacts restriction on PMs
                 if send_type == "users" and "mutual contacts" in err_text:
                     is_real = await _check_is_real_spamblock(client, account)
                     if is_real:
-                        await log_event("warn", "sender", f"[{account['phone']}] Спам-блок підтверджено: тільки взаємні контакти")
-                        await _mark_spam_block(account["id"], "Тільки взаємні контакти")
-                        break
+                        await log_event("warn", "sender", f"[{account['phone']}] Mutual contacts — підтверджено спам-блок @SpamBot")
+                        await _mark_spam_block(account["id"], "Підтверджено @SpamBot")
+                    else:
+                        await log_event("warn", "sender", f"[{account['phone']}] Mutual contacts — в @SpamBot чисто. Зупиняємо цей акаунт на поточну задачу.")
+                    break
 
                 await _increment_stats(task_id, success=False)
                 await log_event("warn", "sender", f"[{account['phone']}] → {target_str}: {str(e)[:120]}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
     while task_id in _active_task_loops:
         db = await get_db()
@@ -805,12 +755,14 @@ async def _do_send_task(task_id: int):
             await log_event("warn", "sender", f"Task #{task_id}: no active accounts available")
             break
 
-        # Distribute targets across active accounts and run concurrently in parallel threads/workers
+        # Shared concurrent queue for all accounts
+        target_queue = asyncio.Queue()
+        for t in targets:
+            await target_queue.put(t)
+
         workers = []
-        for i, account in enumerate(accounts):
-            acc_targets = [t for idx, t in enumerate(targets) if idx % len(accounts) == i]
-            if acc_targets:
-                workers.append(_send_for_account(account, acc_targets))
+        for account in accounts:
+            workers.append(_send_for_account(account, target_queue, targets, len(accounts)))
 
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
@@ -833,6 +785,7 @@ async def _do_send_task(task_id: int):
     await db.commit()
     await db.close()
     await log_event("info", "sender", f"Task #{task_id} completed")
+
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
